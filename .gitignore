@@ -35,3 +35,4 @@ node_modules/
 e2e/*
 uv.lock
 .coverage
+.pytest_cache
