@@ -37,6 +37,7 @@ uv run --group dev pytest
 
 ### Manual / Headless Login Scripts
 ```bash
+uv run omnisearch-login-all [--headless]
 uv run omnisearch-capes-login [--headless]
 uv run omnisearch-scite-login [--headless]
 uv run omnisearch-consensus-login [--headless]

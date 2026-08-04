@@ -69,12 +69,14 @@ async def run_login_flow(headless: bool = False):
         try:
             # Aguarda até que a URL mude e não contenha mais "sign-in" ou "login"
             success = False
-            for _ in range(150): # 5 minutos (loops de 2s)
-                if "consensus.app" in page.url and "sign-in" not in page.url and "login" not in page.url:
+            for _ in range(300): # loops de 500ms
+                cookies = await context.cookies()
+                c_names = [c["name"] for c in cookies]
+                if "consensus_sess" in c_names or "__session" in c_names or ("consensus.app" in page.url and "sign-in" not in page.url and "login" not in page.url):
                     print(f"Login detectado com sucesso! URL atual: {page.url}")
                     success = True
                     break
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(500)
             if not success:
                 raise Exception("Timeout aguardando redirecionamento pós-login")
         except Exception as e:

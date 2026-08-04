@@ -45,7 +45,11 @@ Muitas plataformas cobram por acesso a APIs oficiais ou barram o conteúdo compl
 
 Disponibilizamos comandos interativos para você fazer login facilmente e salvar os cookies de acesso automaticamente no seu arquivo `.env`:
 
-* **CAPES (CAFe) - Para acesso Institucional ao IEEE:**
+* **Todas as Plataformas (CAPES + Scite + Consensus em sequência):**
+  ```bash
+  uv run omnisearch-login-all
+  ```
+* **CAPES / IEEE Xplore:**
   ```bash
   uv run omnisearch-capes-login
   ```

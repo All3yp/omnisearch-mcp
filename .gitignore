@@ -32,8 +32,6 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
-e2e/example.spec.js
-e2e/test-1.spec.ts
-e2e/test-2.spec.ts
+e2e/*
 uv.lock
 .coverage

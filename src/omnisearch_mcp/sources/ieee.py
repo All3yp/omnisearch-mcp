@@ -156,7 +156,14 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
         "rowsPerPage": max(1, min(max_results, 100)),
     }
     
-    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
         resp = await client.post(frontend_api_url, json=payload)
+        url_str = str(resp.url).lower()
+        if resp.status_code in (301, 302, 401, 403) or "login" in url_str or ("periodicos.capes.gov.br" in url_str and "ieeexplore" not in url_str):
+            raise IEEEKeyMissingError("IEEE_COOKIES is expired or missing. Please run 'uv run omnisearch-capes-login' to authenticate.")
         resp.raise_for_status()
-        return parse_ieee_frontend_response(resp.json())
+        try:
+            data = resp.json()
+        except Exception:
+            raise IEEEKeyMissingError("IEEE_COOKIES is expired or invalid. Received HTML response instead of JSON. Please run 'uv run omnisearch-capes-login' to authenticate.")
+        return parse_ieee_frontend_response(data)

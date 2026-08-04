@@ -61,10 +61,15 @@ async def search_scite(query: str, max_results: int = 10) -> list[Paper]:
         "size": max(1, min(max_results, 50)),
     }
 
-    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
         resp = await client.get(API_URL, params=params)
+        if resp.status_code in (301, 302, 401, 403) or "login" in str(resp.url).lower() or "sign-in" in str(resp.url).lower():
+            raise SciteAuthMissingError()
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            raise SciteAuthMissingError("SCITE_COOKIES is expired or invalid. Received HTML response instead of JSON. Please run 'uv run omnisearch-scite-login' to authenticate.")
         
         results = data.get("hits", {}).get("hits", []) if "hits" in data else data.get("papers", [])
         # Extract internal document representations depending on scite API response shape

@@ -58,21 +58,14 @@ def mock_playwright(mock_playwright_page):
     context.new_page = _async_val(mock_playwright_page)
     browser.new_context = _async_val(context)
 
-    playwright_cm = MagicMock()
-    playwright_cm.chromium.launch = _async_val(browser)
-
-    cm = MagicMock()
-    cm.__aenter__ = _async_val(playwright_cm)
-    cm.__aexit__ = _async_noop
-    return cm, browser
+    return browser
 
 
 @pytest.mark.asyncio
 async def test_capes_login_flow_already_logged_in(mock_playwright, tmp_path, monkeypatch):
-    cm, browser = mock_playwright
     monkeypatch.chdir(tmp_path)
 
-    with patch("omnisearch_mcp.scripts.capes_login.async_playwright", return_value=cm):
+    with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
         await capes_login.run_login_flow(headless=True)
 
     env_file = tmp_path / ".env"
@@ -121,13 +114,7 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
     context.new_page = _async_val(mock_playwright_page)
     browser.new_context = _async_val(context)
 
-    playwright_cm = MagicMock()
-    playwright_cm.chromium.launch = _async_val(browser)
-    cm = MagicMock()
-    cm.__aenter__ = _async_val(playwright_cm)
-    cm.__aexit__ = _async_noop
-
-    with patch("omnisearch_mcp.scripts.capes_login.async_playwright", return_value=cm):
+    with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=browser):
         with patch("asyncio.sleep", _async_noop):
             await capes_login.run_login_flow(headless=True)
 
@@ -137,12 +124,11 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_scite_login_flow(mock_playwright, tmp_path, monkeypatch):
-    cm, browser = mock_playwright
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SCITE_EMAIL", "test@scite.ai")
     monkeypatch.setenv("SCITE_PASS", "password123")
 
-    with patch("omnisearch_mcp.scripts.scite_login.async_playwright", return_value=cm):
+    with patch("omnisearch_mcp.scripts.scite_login.launch_async", return_value=mock_playwright):
         await scite_login.run_login_flow(headless=True)
 
     env_file = tmp_path / ".env"
@@ -178,6 +164,8 @@ async def test_consensus_login_flow(mock_playwright_page, tmp_path, monkeypatch)
 
 
 def test_main_cli_args(monkeypatch):
+    from omnisearch_mcp.scripts import login_all
+
     with patch("omnisearch_mcp.scripts.scite_login.run_login_flow", side_effect=_async_noop):
         with patch("asyncio.run") as mock_run:
             monkeypatch.setattr("sys.argv", ["script", "--headless"])
@@ -195,3 +183,21 @@ def test_main_cli_args(monkeypatch):
             monkeypatch.setattr("sys.argv", ["script", "--headless"])
             capes_login.main()
             assert mock_run.called
+
+    with patch("omnisearch_mcp.scripts.login_all.run_all_logins", side_effect=_async_noop):
+        with patch("asyncio.run") as mock_run:
+            monkeypatch.setattr("sys.argv", ["script", "--headless"])
+            login_all.main()
+            assert mock_run.called
+
+
+@pytest.mark.asyncio
+async def test_login_all_flow():
+    from omnisearch_mcp.scripts import login_all
+    with patch("omnisearch_mcp.scripts.capes_login.run_login_flow", side_effect=_async_noop) as m1:
+        with patch("omnisearch_mcp.scripts.scite_login.run_login_flow", side_effect=_async_noop) as m2:
+            with patch("omnisearch_mcp.scripts.consensus_login.run_login_flow", side_effect=_async_noop) as m3:
+                await login_all.run_all_logins(headless=True)
+                assert m1.called
+                assert m2.called
+                assert m3.called

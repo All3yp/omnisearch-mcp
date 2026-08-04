@@ -64,10 +64,15 @@ async def search_consensus(query: str, max_results: int = 10) -> list[Paper]:
         "limit": max(1, min(max_results, 50)),
     }
 
-    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
         resp = await client.get(API_URL, params=params)
+        if resp.status_code in (301, 302, 401, 403, 404) or "login" in str(resp.url).lower() or "sign-in" in str(resp.url).lower():
+            raise ConsensusAuthMissingError()
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            raise ConsensusAuthMissingError("CONSENSUS_COOKIES is expired or invalid. Received HTML response instead of JSON. Please run 'uv run omnisearch-consensus-login' to authenticate.")
         
         results = data.get("results", []) or data.get("papers", [])
         return [_to_paper(item) for item in results]
