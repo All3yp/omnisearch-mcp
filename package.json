@@ -1,0 +1,26 @@
+{
+  "name": "omnisearch-mcp",
+  "version": "1.0.0",
+  "description": "Um servidor [Model Context Protocol (MCP)](https://modelcontextprotocol.io) projetado para que agentes LLM (como Claude, Copilot, Cursor, etc.) possam pesquisar literatura acadêmica de forma unificada através de múltiplas fontes, além de permitir indexação local de PDFs.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/all3yp/omnisearch-mcp.git"
+  },
+  "keywords": [],
+  "author": "all3yp",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/all3yp/omnisearch-mcp/issues"
+  },
+  "homepage": "https://github.com/all3yp/omnisearch-mcp#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.1.2"
+  }
+}
