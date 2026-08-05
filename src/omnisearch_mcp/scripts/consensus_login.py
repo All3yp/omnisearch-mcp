@@ -1,10 +1,17 @@
 import argparse
 import asyncio
-import re
 from pathlib import Path
 
 import os
 from cloakbrowser import launch_async
+
+from .session_store import (
+    context_options,
+    cookie_header,
+    save_storage_state,
+    storage_summary,
+    update_env_values,
+)
 
 LOGIN_URL = "https://consensus.app/sign-in/"
 SUCCESS_URL = "https://consensus.app/search/"
@@ -12,12 +19,12 @@ SUCCESS_URL = "https://consensus.app/search/"
 async def run_login_flow(headless: bool = False):
     consensus_email = os.getenv("CONSENSUS_EMAIL")
     consensus_pass = os.getenv("CONSENSUS_PASS")
-    
+
     print("Iniciando fluxo de login Consensus com CloakBrowser...")
     try:
         # Lança o CloakBrowser com humanização ativada para mitigar Cloudflare
         browser = await launch_async(headless=headless, humanize=True)
-        context = await browser.new_context()
+        context = await browser.new_context(**context_options("consensus"))
         page = await context.new_page()
 
         print(f"Navegando para {LOGIN_URL}")
@@ -30,22 +37,22 @@ async def run_login_flow(headless: bool = False):
                 # Preenche email
                 email_input = page.locator('input[type="email"], input[name="email"], input[placeholder*="Email" i]').first
                 await email_input.fill(consensus_email)
-                
+
                 # Clica em Next
                 next_btn = page.locator('button:has-text("Next")').first
                 await next_btn.click()
                 await page.wait_for_timeout(2000)
-                
+
                 # Clica em Use password
                 use_pass_btn = page.locator('button:has-text("Use password")').first
                 if await use_pass_btn.is_visible():
                     await use_pass_btn.click()
                     await page.wait_for_timeout(1000)
-                
+
                 # Preenche senha
                 pass_input = page.locator('input[type="password"], input[name="password"]').first
                 await pass_input.fill(consensus_pass)
-                
+
                 # Clica em Sign in
                 signin_btn = page.get_by_test_id("sign-in").get_by_role("button", name="Sign in").first
                 await signin_btn.click()
@@ -65,7 +72,7 @@ async def run_login_flow(headless: bool = False):
 
         print("Por favor, realize o login no navegador aberto caso necessário.")
         print("Aguardando o redirecionamento pós login...")
-        
+
         try:
             # Aguarda até que a URL mude e não contenha mais "sign-in" ou "login"
             success = False
@@ -85,8 +92,9 @@ async def run_login_flow(headless: bool = False):
             return
 
         cookies = await context.cookies()
-        cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-        
+        cookie_string = cookie_header(cookies)
+
+        await save_storage_state(context, "consensus")
         await browser.close()
     except Exception as e:
         print(f"Erro no fluxo do CloakBrowser: {e}")
@@ -96,27 +104,18 @@ async def run_login_flow(headless: bool = False):
         print("Nenhum cookie capturado.")
         return
 
-    print("Cookies capturados!")
-    
+    print(f"Cookies capturados: {storage_summary(cookies)}")
+
     env_path = Path(".env")
-    env_content = ""
-    if env_path.exists():
-        env_content = env_path.read_text()
-        
-    if re.search(r"^CONSENSUS_COOKIES=.*$", env_content, flags=re.MULTILINE):
-        env_content = re.sub(r"^CONSENSUS_COOKIES=.*$", f"CONSENSUS_COOKIES=\"{cookie_string}\"", env_content, flags=re.MULTILINE)
-    else:
-        env_content += f"\nCONSENSUS_COOKIES=\"{cookie_string}\"\n"
-        
-    env_path.write_text(env_content)
-    print(f"Cookies salvos com sucesso em {env_path.absolute()}")
+    update_env_values(env_path, {"CONSENSUS_COOKIES": cookie_string})
+    print(f"Sessão do navegador e cookies salvos com sucesso em {env_path.absolute()}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Realiza login no Consensus e salva os cookies no .env")
     parser.add_argument("--headless", action="store_true", help="Rodar o navegador em modo invisível")
     args = parser.parse_args()
-    
+
     asyncio.run(run_login_flow(args.headless))
 
 if __name__ == "__main__":

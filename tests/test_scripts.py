@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import httpx
 import pytest
+import respx
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
@@ -54,16 +56,24 @@ def mock_playwright(mock_playwright_page):
     browser = MagicMock()
     browser.close = _async_noop
     context = MagicMock()
-    context.cookies = _async_val([{"name": "fake_cookie", "value": "abc"}])
+    context.cookies = _async_val([{"name": "fake_cookie", "value": "abc", "domain": "example.test"}])
+    context.storage_state = _async_noop
+    context.pages = [mock_playwright_page]
     context.new_page = _async_val(mock_playwright_page)
     browser.new_context = _async_val(context)
+    browser.context = context
 
     return browser
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_capes_login_flow_already_logged_in(mock_playwright, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    mock_playwright.context.pages[0].url = "https://ieeexplore-ieee-org.proxy.capes.gov.br/"
+    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
+        return_value=httpx.Response(200, json={"records": []})
+    )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
         await capes_login.run_login_flow(headless=True)
@@ -76,9 +86,11 @@ async def test_capes_login_flow_already_logged_in(mock_playwright, tmp_path, mon
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br/"
+    (tmp_path / ".env").write_text(f"CAPES_PROXY_URL='{proxy_url}'\n", encoding="utf-8")
     monkeypatch.setenv("CAPES_PROXY_URL", proxy_url)
     monkeypatch.setenv("CAFE_INSTITUTION_ID", "IFCE")
     monkeypatch.setenv("CAFE_USERNAME", "user123")
@@ -110,9 +122,14 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
     browser = MagicMock()
     browser.close = _async_noop
     context = MagicMock()
-    context.cookies = _async_val([{"name": "capes_sess", "value": "123"}])
+    context.cookies = _async_val([{"name": "capes_sess", "value": "123", "domain": "capes.gov.br"}])
+    context.storage_state = _async_noop
+    context.pages = [mock_playwright_page]
     context.new_page = _async_val(mock_playwright_page)
     browser.new_context = _async_val(context)
+    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
+        return_value=httpx.Response(200, json={"records": []})
+    )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=browser):
         with patch("asyncio.sleep", _async_noop):
@@ -123,10 +140,51 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_validate_ieee_proxy_session_posts_to_rest_search():
+    route = respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
+        return_value=httpx.Response(200, json={"records": []})
+    )
+    valid, reason = await capes_login.validate_ieee_proxy_session(
+        "https://ieeexplore-ieee-org.proxy.capes.gov.br",
+        "session=abc",
+        "agent",
+    )
+    assert valid is True
+    assert reason == "validated"
+    request = route.calls.last.request
+    assert request.headers["cookie"] == "session=abc"
+    assert request.headers["origin"] == "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_validate_ieee_proxy_session_rejects_login_html():
+    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html>login</html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    valid, reason = await capes_login.validate_ieee_proxy_session(
+        "https://ieeexplore-ieee-org.proxy.capes.gov.br",
+        "session=secret-value",
+        "agent",
+    )
+    assert valid is False
+    assert "HTML" in reason
+    assert "secret-value" not in reason
+
+
+@pytest.mark.asyncio
 async def test_scite_login_flow(mock_playwright, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SCITE_EMAIL", "test@scite.ai")
     monkeypatch.setenv("SCITE_PASS", "password123")
+    mock_playwright.context.cookies = _async_val([
+        {"name": "userSession", "value": "abc", "domain": "scite.ai"}
+    ])
 
     with patch("omnisearch_mcp.scripts.scite_login.launch_async", return_value=mock_playwright):
         await scite_login.run_login_flow(headless=True)
@@ -135,7 +193,7 @@ async def test_scite_login_flow(mock_playwright, tmp_path, monkeypatch):
     assert env_file.exists()
     content = env_file.read_text()
     assert "SCITE_COOKIES=" in content
-    assert "fake_cookie=abc" in content
+    assert "userSession=abc" in content
 
 
 @pytest.mark.asyncio
@@ -149,7 +207,9 @@ async def test_consensus_login_flow(mock_playwright_page, tmp_path, monkeypatch)
     browser = MagicMock()
     browser.close = _async_noop
     context = MagicMock()
-    context.cookies = _async_val([{"name": "consensus_sess", "value": "xyz"}])
+    context.cookies = _async_val([{"name": "consensus_sess", "value": "xyz", "domain": "consensus.app"}])
+    context.storage_state = _async_noop
+    context.pages = [mock_playwright_page]
     context.new_page = _async_val(mock_playwright_page)
     browser.new_context = _async_val(context)
 

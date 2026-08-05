@@ -19,12 +19,13 @@ API_URL = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
 
 
 class IEEEKeyMissingError(RuntimeError):
-    """Raised when neither IEEE_XPLORE_API_KEY nor CAPES_PROXY_URL/IEEE_COOKIES are configured."""
+    """Raised when IEEE auth/config is missing or expired."""
 
-    def __init__(self) -> None:
+    def __init__(self, message: str | None = None) -> None:
         super().__init__(
-            "IEEE_XPLORE_API_KEY is not set, and no CAPES_PROXY_URL or IEEE_COOKIES "
-            "are provided. Please configure one of these to enable IEEE Xplore search."
+            message
+            or "IEEE_XPLORE_API_KEY is not set, and no CAPES_PROXY_URL or IEEE_COOKIES "
+            "are provided. Please authenticate with CAPES/IEEE or configure an IEEE key."
         )
 
 
@@ -77,7 +78,7 @@ def _to_paper_frontend(item: dict[str, Any]) -> Paper:
     url = item.get("documentLink")
     if url and not url.startswith("http"):
         url = f"https://ieeexplore.ieee.org{url}"
-        
+
     pdf_url = item.get("pdfLink")
     if pdf_url and not pdf_url.startswith("http"):
         pdf_url = f"https://ieeexplore.ieee.org{pdf_url}"
@@ -131,11 +132,11 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
             resp = await client.get(API_URL, params=params)
             resp.raise_for_status()
             return parse_ieee_response(resp.json())
-            
+
     # 2. Fallback to Frontend API via Proxy or Cookies
     proxy_url = cfg.capes_proxy_url or "https://ieeexplore.ieee.org"
     frontend_api_url = f"{proxy_url.rstrip('/')}/rest/search"
-    
+
     headers = {
         "User-Agent": cfg.user_agent,
         "Accept": "application/json, text/plain, */*",
@@ -143,7 +144,7 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
         "Origin": proxy_url,
         "Referer": f"{proxy_url}/search/searchresult.jsp",
     }
-    
+
     if cfg.ieee_cookies:
         headers["Cookie"] = cfg.ieee_cookies
 
@@ -155,7 +156,7 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
         "returnType": "SEARCH",
         "rowsPerPage": max(1, min(max_results, 100)),
     }
-    
+
     async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
         resp = await client.post(frontend_api_url, json=payload)
         url_str = str(resp.url).lower()

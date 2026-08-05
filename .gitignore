@@ -11,6 +11,8 @@ wheels/
 
 # Environment / secrets
 .env
+.omnisearch/
+*.storage.json
 
 # Local PDF index files (created next to indexed PDF folders)
 .pdf_index.json
@@ -36,5 +38,6 @@ e2e/*
 uv.lock
 .coverage
 .pytest_cache
+.serena/
 *bak*
 .ide/launch.json

@@ -12,14 +12,18 @@
 - Use targeted tools (`search_ieee`, `search_scite`, `search_consensus`, `search_arxiv`, `search_pdf_library`) for provider-specific queries.
 
 ### 2. What to do when Cookies / Auth Expire
-If an MCP tool returns an authentication or expired cookie error (e.g. `SCITE_COOKIES is not set or expired`, `IEEEKeyMissingError`, `401 Unauthorized`, or `302 Redirect`):
+If an MCP tool returns `auth_required: true`, expired-cookie text, `IEEEKeyMissingError`, `401 Unauthorized`, `403 Forbidden`, a login redirect, or HTML instead of JSON:
 
 1. **Do NOT edit source code.**
-2. **Run the corresponding login script** via terminal to refresh cookies in `.env`:
-   - **Scite.ai:** `uv run omnisearch-scite-login --headless`
-   - **Consensus.app:** `uv run omnisearch-consensus-login --headless`
-   - **CAPES / IEEE:** `uv run omnisearch-capes-login --headless`
-3. **Retry the MCP tool call immediately.** The server dynamically reloads `.env` (`get_config()`) on every request without requiring a server restart.
+2. **Do NOT retry the same provider in a loop.** Stop, report the auth block, and wait for human relogin.
+3. Ask the human to run the command returned by the tool's `command` field. Defaults:
+   - **CAPES / IEEE (highest priority):** `uv run omnisearch-capes-login` (visible browser recommended; use `--headless` only if it is known to work)
+   - **Scite.ai:** `uv run omnisearch-scite-login`
+   - **Consensus.app:** `uv run omnisearch-consensus-login`
+4. Wait until the login script reports success. The script persists browser state in `.omnisearch/sessions/` and writes derived cookies to `.env`.
+5. Retry the MCP tool **once**. If `auth_required: true` persists, stop and ask the human to relogin visibly/manual-complete MFA/CAPTCHA/SSO.
+
+The server dynamically reloads `.env` (`get_config()`) on every request without requiring a server restart.
 
 ---
 

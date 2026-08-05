@@ -1,6 +1,7 @@
 """Scite.ai API adapter using Web API and cookies."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -8,16 +9,17 @@ import httpx
 from .. import config
 from ..models import Paper
 
-# Note: This uses Scite's internal API which might change. 
+# Note: This uses Scite's internal API which might change.
 # Typical structure for their search endpoint:
 API_URL = "https://scite.ai/api/search/papers"
 
 
 class SciteAuthMissingError(RuntimeError):
-    def __init__(self) -> None:
+    def __init__(self, message: str | None = None) -> None:
         super().__init__(
-            "SCITE_COOKIES is not set or expired. Please run `uv run omnisearch-scite-login` to authenticate "
-            "e capturar os cookies logados."
+            message
+            or "SCITE_COOKIES is not set or expired. Please run `uv run omnisearch-scite-login` "
+            "to authenticate and capture logged-in cookies."
         )
 
 
@@ -70,12 +72,12 @@ async def search_scite(query: str, max_results: int = 10) -> list[Paper]:
             data = resp.json()
         except json.JSONDecodeError:
             raise SciteAuthMissingError("SCITE_COOKIES is expired or invalid. Received HTML response instead of JSON. Please run 'uv run omnisearch-scite-login' to authenticate.")
-        
+
         results = data.get("hits", {}).get("hits", []) if "hits" in data else data.get("papers", [])
         # Extract internal document representations depending on scite API response shape
         papers = []
         for r in results:
             item = r.get("_source", r)
             papers.append(_to_paper(item))
-            
+
         return papers

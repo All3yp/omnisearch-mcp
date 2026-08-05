@@ -25,7 +25,7 @@ class CoreKeyMissingError(RuntimeError):
 
 def _to_paper(item: dict[str, Any]) -> Paper:
     authors = [a.get("name", "") for a in item.get("authors") or []]
-    
+
     year_raw = item.get("publishedDate") or item.get("year")
     year = None
     if isinstance(year_raw, int):
@@ -60,18 +60,18 @@ async def search_core(query: str, max_results: int = 10) -> list[Paper]:
     cfg = config.get_config()
     if not cfg.core_api_key:
         raise CoreKeyMissingError()
-        
+
     headers = {
         "User-Agent": cfg.user_agent,
         "Authorization": f"Bearer {cfg.core_api_key}"
     }
-        
+
     params = {
         "q": query,
         "limit": max(1, min(max_results, 100)),
     }
-    
-    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+
+    async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
         resp = await client.get(API_URL, params=params)
         resp.raise_for_status()
         data = resp.json()

@@ -1,10 +1,17 @@
 import argparse
 import asyncio
 import os
-import re
 from pathlib import Path
 
 from cloakbrowser import launch_async
+
+from .session_store import (
+    context_options,
+    cookie_header,
+    save_storage_state,
+    storage_summary,
+    update_env_values,
+)
 
 LOGIN_URL = "https://scite.ai/login"
 SUCCESS_URL = "https://scite.ai/dashboard"
@@ -13,14 +20,14 @@ SUCCESS_URL = "https://scite.ai/dashboard"
 async def run_login_flow(headless: bool = False):
     scite_email = os.getenv("SCITE_EMAIL")
     scite_password = os.getenv("SCITE_PASS")
-    
+
     print("Iniciando fluxo de login Scite com CloakBrowser...")
     browser_path = os.getenv("PLAYWRIGHT_BROWSER_PATH")
     if browser_path and not os.path.exists(browser_path):
         browser_path = None
 
     browser = await launch_async(headless=headless, humanize=True)
-    context = await browser.new_context()
+    context = await browser.new_context(**context_options("scite"))
     page = await context.new_page()
 
     print("Navegando para https://scite.ai/")
@@ -41,23 +48,23 @@ async def run_login_flow(headless: bool = False):
             if await login_btn_home.is_visible():
                 await login_btn_home.click()
                 await page.wait_for_timeout(800)
-            
+
             # Preenche email
             email_input = page.locator('input[type="email"], input[name="email"], input[placeholder*="Email" i]').first
             if await email_input.is_visible():
                 await email_input.fill(scite_email)
-                
+
                 # Clica em Next
                 next_btn = page.locator('button:has-text("Next")').first
                 if await next_btn.is_visible():
                     await next_btn.click()
                     await page.wait_for_timeout(800)
-            
+
             # Preenche senha
             pass_input = page.locator('input[type="password"], input[name="password"]').first
             if await pass_input.is_visible():
                 await pass_input.fill(scite_password)
-                
+
                 # Clica no botão final de login
                 submit_btn = page.locator('button[type="submit"]:has-text("Log In"), button:has-text("Sign In")').first
                 if await submit_btn.is_visible():
@@ -67,7 +74,7 @@ async def run_login_flow(headless: bool = False):
             print(f"Não foi possível automatizar o login do Scite completamente: {e}")
 
     print("Aguardando login no Scite.ai...")
-    
+
     # Monitoramento rápido dos cookies de sessão
     max_checks = 30 if (scite_email and scite_password) else 600
     success = False
@@ -80,29 +87,28 @@ async def run_login_flow(headless: bool = False):
             success = True
             break
 
+    if not success:
+        print("Login no Scite não validado. Ação humana necessária: execute `uv run omnisearch-scite-login` em modo visível, conclua o login no navegador e tente a busca novamente uma vez.")
+        await browser.close()
+        return
+
     # Pega os cookies
     cookies = await context.cookies()
-    cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-    
+    cookie_string = cookie_header(cookies)
+
+    await save_storage_state(context, "scite")
     await browser.close()
 
     if not cookie_string:
         print("Nenhum cookie capturado.")
         return
 
-    print("Cookies do Scite capturados!")
-    
+    print(f"Cookies do Scite capturados: {storage_summary(cookies)}")
+
     # Salva os cookies no .env
     env_path = Path(".env")
-    env_content = env_path.read_text() if env_path.exists() else ""
-    
-    if re.search(r"^SCITE_COOKIES=.*$", env_content, flags=re.MULTILINE):
-        env_content = re.sub(r"^SCITE_COOKIES=.*$", f"SCITE_COOKIES=\"{cookie_string}\"", env_content, flags=re.MULTILINE)
-    else:
-        env_content += f"\nSCITE_COOKIES=\"{cookie_string}\"\n"
-        
-    env_path.write_text(env_content)
-    print(f"Cookies salvos com sucesso em {env_path.absolute()}")
+    update_env_values(env_path, {"SCITE_COOKIES": cookie_string})
+    print(f"Sessão do navegador e cookies salvos com sucesso em {env_path.absolute()}")
 
 
 def main():

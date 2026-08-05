@@ -1,111 +1,104 @@
-# Omnisearch MCP (based on ieee-research-mcp)
+# Omnisearch MCP
 
-Um servidor [Model Context Protocol (MCP)](https://modelcontextprotocol.io) projetado para que agentes LLM (como Claude, Copilot, Cursor, etc.) possam pesquisar literatura acadêmica de forma unificada através de múltiplas fontes, além de permitir indexação local de PDFs.
+Servidor [Model Context Protocol (MCP)](https://modelcontextprotocol.io) para agentes LLM pesquisarem literatura acadêmica, resolverem PDFs open-access, baixarem/lerem papers e pesquisarem bibliotecas locais de PDFs.
 
-## 🚀 Fontes Suportadas
+## Fontes suportadas
 
-Atualmente, o servidor busca simultaneamente em 7 bases de dados:
-1. **IEEE Xplore**
-2. **arXiv**
-3. **ACM Digital Library** (via CrossRef)
-4. **Semantic Scholar**
-5. **CORE (core.ac.uk)**
-6. **Scite.ai**
-7. **Consensus.app**
+- IEEE Xplore via API oficial ou CAPES/CAFe proxy + cookies persistidos
+- arXiv
+- ACM Digital Library metadata via CrossRef
+- CrossRef
+- Semantic Scholar
+- CORE
+- Scite.ai
+- Consensus.app
+- Unpaywall para resolver PDFs open-access por DOI
+- PDF local: indexação, busca e extração de texto
 
-Além disso, possui ferramentas para ler e pesquisar dentro da sua **biblioteca local de PDFs**.
-
----
-
-## 🛠 Instalação
-
-O projeto requer Python 3.12+ e o gerenciador de pacotes [uv](https://docs.astral.sh/uv/).
+## Instalação
 
 ```bash
 git clone https://github.com/all3yp/omnisearch-mcp
 cd omnisearch-mcp
-
-# 1. Instalar dependências (incluindo o Playwright)
 uv sync
-
-# 2. Instalar navegadores necessários para a automação de login
 uv run playwright install chromium
-
-# 3. Preparar o arquivo de ambiente
 cp .env.example .env
 ```
 
----
+Edite `.env` conforme necessário:
 
-## 🔐 Configuração e Login Automático
+```env
+CONTACT_EMAIL=seu-email@example.com
+SEMANTIC_SCHOLAR_API_KEY=
+CORE_API_KEY=
+IEEE_XPLORE_API_KEY=
 
-Muitas plataformas cobram por acesso a APIs oficiais ou barram o conteúdo completo. Para contornar isso e buscar metadados de forma eficiente, este projeto utiliza as próprias sessões logadas do seu navegador para injetar cookies nas ferramentas de busca (Scite, Consensus e IEEE via proxy CAPES CAFe).
+CAFE_INSTITUTION_ID=
+CAFE_USERNAME=
+CAFE_PASSWORD=
+SCITE_EMAIL=
+SCITE_PASS=
+CONSENSUS_EMAIL=
+CONSENSUS_PASS=
+PLAYWRIGHT_BROWSER_PATH=
+```
 
-### Usando os Scripts de Login (Cookies)
+## Comandos para usuário humano
 
-Disponibilizamos comandos interativos para você fazer login facilmente e salvar os cookies de acesso automaticamente no seu arquivo `.env`:
-
-* **Todas as Plataformas (CAPES + Scite + Consensus em sequência):**
-  ```bash
-  uv run omnisearch-login-all
-  ```
-* **CAPES / IEEE Xplore:**
-  ```bash
-  uv run omnisearch-capes-login
-  ```
-* **Scite.ai:**
-  ```bash
-  uv run omnisearch-scite-login
-  ```
-* **Consensus.app:**
-  ```bash
-  uv run omnisearch-consensus-login
-  ```
-
-**Execução do servidor**
+### Rodar servidor MCP
 
 ```bash
 uv run omnisearch-mcp
 ```
 
-**Execução dos testes unitários**
+### Login e persistência de sessão
+
+Recomendado: rode em modo visível na primeira vez, principalmente CAPES/IEEE, para completar MFA/CAPTCHA/SSO se aparecer.
+
 ```bash
-uv run pytest --cov=src/omnisearch_mcp --cov-report=term-missing
+uv run omnisearch-login-all
+uv run omnisearch-capes-login
+uv run omnisearch-scite-login
+uv run omnisearch-consensus-login
 ```
 
-> **Como funciona:** O script abrirá uma janela do navegador. Basta realizar o seu login normalmente na plataforma. Assim que você for autenticado, a janela será fechada sozinha e o seu arquivo `.env` será atualizado com os cookies capturados da sessão!
+Depois que funcionar visivelmente, você pode tentar headless:
 
-*Dica: Após o primeiro login, caso deseje automatizar em segundo plano, você pode tentar passar a flag `--headless` no comando.*
+```bash
+uv run omnisearch-login-all --headless
+uv run omnisearch-capes-login --headless
+uv run omnisearch-scite-login --headless
+uv run omnisearch-consensus-login --headless
+```
 
-### APIs Oficiais (Tokens)
+Os scripts salvam:
 
-Para as ferramentas que possuem APIs abertas e oficiais, você pode adicionar a chave diretamente editando o arquivo `.env`:
-- `SEMANTIC_SCHOLAR_API_KEY`: Chave da API do Semantic Scholar (opcional, mas evita rate-limit).
-- `CORE_API_KEY`: Chave da API v3 do CORE (obtida gratuitamente no [site deles](https://core.ac.uk/services/api/)).
-- `IEEE_XPLORE_API_KEY`: Chave oficial do IEEE (opcional caso esteja utilizando o login da CAPES/proxy).
+- estado do navegador em `.omnisearch/sessions/*.storage.json`;
+- cookies derivados no `.env` para os adapters HTTP.
 
----
+Esses arquivos contêm segredos de sessão e são ignorados pelo Git.
 
-## 🤖 Ferramentas MCP (Tools) Disponíveis
+### Testes
 
-| Ferramenta | Descrição | Requisitos de Autenticação |
-|------------|-------------|----------------------------|
-| `search_all` | Busca simultânea em todas as 7 bases (IEEE, arXiv, ACM, S2, CORE, Scite, Consensus). | Recomendado rodar os scripts de login |
-| `search_ieee` | Busca no IEEE Xplore. | Login CAPES (`omnisearch-capes-login`) ou API Key |
-| `search_scite` | Busca smart citations no Scite.ai. | Login Scite (`omnisearch-scite-login`) |
-| `search_consensus` | Busca de papers no Consensus.app. | Login Consensus (`omnisearch-consensus-login`) |
-| `search_semantic_scholar` | Busca no Semantic Scholar (Graph API). | Opcional API Key |
-| `search_core` | Busca no CORE v3. | Necessário CORE API Key |
-| `search_arxiv` | Busca aberta no arXiv. | Nenhum |
-| `search_acm` / `search_crossref` | Busca de metadados no CrossRef/ACM. | Nenhum |
-| `index_pdf_library` | Lê seus PDFs locais e extrai textos para cache. | Caminho Local |
-| `search_pdf_library` | Pesquisa por trechos dentro dos seus PDFs locais. | Caminho Local |
+```bash
+uv run --group dev pytest
+```
 
----
+Se o `uv` falhar no Git Bash/Windows por trampoline, use:
 
-## 💻 Uso com Clientes (Cursor, Claude, etc.)
+```bash
+/c/Users/alley/Code/alley/python/omnisearch-mcp/.venv/Scripts/python.exe -m pytest tests/ -v --tb=short
+```
 
-Adicione o servidor nas configurações do seu cliente MCP apontando para o comando de inicialização deste diretório:
+## Como configurar no Claude Code
+
+Na raiz do projeto, adicione o MCP ao Claude Code:
+
+```bash
+claude mcp add omnisearch-mcp -- uv run omnisearch-mcp
+```
+
+Ou use configuração JSON equivalente:
 
 ```json
 {
@@ -113,15 +106,138 @@ Adicione o servidor nas configurações do seu cliente MCP apontando para o coma
     "omnisearch-mcp": {
       "command": "uv",
       "args": ["run", "omnisearch-mcp"],
-      "env": {},
-      "cwd": "/caminho/absoluto/para/este/projeto/omnisearch-mcp"
+      "cwd": "C:/Users/alley/Code/alley/python/omnisearch-mcp"
     }
   }
 }
 ```
 
----
+Depois reinicie/recarregue o Claude Code e use ferramentas como:
 
-## 📜 Créditos
+- `search_all`
+- `search_ieee`
+- `resolve_oa_url`
+- `download_paper`
+- `read_paper_content`
+- `index_pdf_library`
+- `search_pdf_library`
 
-Este projeto é um fork ampliado e modificado do projeto original [ieee-research-mcp](https://github.com/kevinzhao-tech/ieee-research-mcp) criado por **Kevin Zhao**. A base do servidor e as integrações originais com IEEE, arXiv e CrossRef são creditadas ao trabalho inicial dele.
+## Como configurar no Codex / OpenAI Codex CLI
+
+Adicione o servidor MCP no arquivo de configuração do Codex com o comando abaixo:
+
+```toml
+[mcp_servers.omnisearch-mcp]
+command = "uv"
+args = ["run", "omnisearch-mcp"]
+cwd = "C:/Users/alley/Code/alley/python/omnisearch-mcp"
+```
+
+Se seu cliente Codex usar JSON em vez de TOML, use:
+
+```json
+{
+  "mcpServers": {
+    "omnisearch-mcp": {
+      "command": "uv",
+      "args": ["run", "omnisearch-mcp"],
+      "cwd": "C:/Users/alley/Code/alley/python/omnisearch-mcp"
+    }
+  }
+}
+```
+
+## Ferramentas MCP principais
+
+| Tool | Uso |
+|---|---|
+| `search_all(query, max_results_each=5)` | Busca em todas as fontes, preserva seções por fonte e retorna `papers` deduplicado + `total`. |
+| `search_ieee(query, max_results=10)` | Busca IEEE por API key ou CAPES/IEEE proxy cookies. |
+| `search_arxiv(query, max_results=10)` | Busca arXiv aberta com retry para rate-limit. |
+| `search_acm(query, max_results=10)` | Busca ACM via CrossRef metadata. |
+| `search_crossref(query, max_results=10)` | Busca CrossRef. |
+| `search_semantic_scholar(query, max_results=10)` | Busca Semantic Scholar com retry para 429. |
+| `search_core(query, max_results=10)` | Busca CORE; requer `CORE_API_KEY`. |
+| `search_scite(query, max_results=10)` | Busca Scite; requer sessão/cookies. |
+| `search_consensus(query, max_results=10)` | Busca Consensus; requer sessão/cookies. |
+| `get_doi_metadata(doi)` | Normaliza metadata CrossRef por DOI. |
+| `resolve_oa_url(doi)` | Resolve PDF open-access via Unpaywall. |
+| `download_paper(doi, title='', pdf_url=None, save_path='./downloads', use_scihub=False)` | Baixa PDF por fallback: URL direta → Unpaywall → CORE → Sci-Hub opcional. |
+| `read_paper_content(...)` | Baixa paper e extrai texto do PDF. |
+| `index_pdf_library(folder_path, force=False)` | Indexa PDFs locais. |
+| `search_pdf_library(folder_path, query, ...)` | Pesquisa texto em PDFs indexados. |
+| `read_pdf_text(path, max_chars=20000)` | Extrai texto de PDF local. |
+
+## Como a busca IEEE/CAPES funciona
+
+O login CAPES abre navegador via CloakBrowser/Playwright, persiste `storage_state` e deriva cookies HTTP.
+
+Antes de salvar, o script CAPES valida a sessão com uma busca real:
+
+```text
+POST {CAPES_PROXY_URL}/rest/search
+```
+
+Payload mínimo:
+
+```json
+{
+  "newsearch": true,
+  "queryText": "machine learning",
+  "returnType": "SEARCH",
+  "rowsPerPage": 1
+}
+```
+
+Só salva se o endpoint retornar JSON compatível com IEEE. Se receber HTML/login/401/403/redirect, não salva e pede relogin humano.
+
+O adapter `search_ieee` usa o mesmo endpoint `/rest/search`; não automatiza browser para pesquisar.
+
+## Instruções para agentes quando auth falhar
+
+Se uma tool retornar `auth_required: true`:
+
+1. **Pare de tentar a mesma busca em loop.**
+2. Leia `provider`, `command` e `agent_instruction`.
+3. Peça ao humano para rodar o comando indicado.
+4. Aguarde o humano confirmar que o login terminou.
+5. Tente a tool novamente **uma vez**.
+6. Se falhar de novo, reporte bloqueio de autenticação e use fontes públicas se possível.
+
+Exemplo de resposta de auth:
+
+```json
+{
+  "auth_required": true,
+  "provider": "ieee",
+  "action": "human_relogin_required",
+  "command": "uv run omnisearch-capes-login --headless",
+  "agent_instruction": "Stop retrying this provider. Ask the human to run the command, wait for login completion, then retry the same tool once.",
+  "results": []
+}
+```
+
+Para `search_all`, veja também:
+
+```json
+{
+  "auth_required_sources": ["ieee", "scite", "consensus"],
+  "agent_instruction": "For sources in auth_required_sources, do not retry in a loop..."
+}
+```
+
+### Prioridade de relogin
+
+1. CAPES/IEEE: `uv run omnisearch-capes-login` em modo visível é o caminho mais confiável.
+2. Scite: `uv run omnisearch-scite-login`.
+3. Consensus: `uv run omnisearch-consensus-login`.
+
+## Notas de segurança
+
+- `.env`, `.omnisearch/` e `*.storage.json` contêm segredos de sessão.
+- Não imprima cookies, storage state, senhas ou tokens em logs/prompts.
+- `use_scihub` é `False` por padrão. Use apenas quando você tiver direito legítimo de acesso ao paper e aceitar o risco legal local.
+
+## Créditos
+
+Fork ampliado de [ieee-research-mcp](https://github.com/kevinzhao-tech/ieee-research-mcp), criado por Kevin Zhao.

@@ -303,6 +303,44 @@ async def test_search_semantic_scholar(monkeypatch):
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_search_semantic_scholar_retries_429(monkeypatch):
+    monkeypatch.setattr(
+        config, "get_config", lambda: config.Config(
+            ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
+            capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key="s2key",
+            core_api_key=None, scite_cookies=None, consensus_cookies=None
+        )
+    )
+    async def no_sleep(*_):
+        return None
+    monkeypatch.setattr("omnisearch_mcp.sources.semantic_scholar.asyncio.sleep", no_sleep)
+    route = respx.get(S2_URL).mock(side_effect=[
+        httpx.Response(429, json={"error": "rate limited"}),
+        httpx.Response(200, json={"data": [{"title": "Recovered"}]}),
+    ])
+    papers = await search_semantic_scholar("ai", max_results=5)
+    assert len(papers) == 1
+    assert papers[0].title == "Recovered"
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_arxiv_retries_429(monkeypatch):
+    async def no_sleep(*_):
+        return None
+    monkeypatch.setattr("omnisearch_mcp.sources.arxiv.asyncio.sleep", no_sleep)
+    route = respx.get(ARXIV_URL).mock(side_effect=[
+        httpx.Response(429, text="rate limited"),
+        httpx.Response(200, text=ARXIV_FIXTURE),
+    ])
+    papers = await search_arxiv("transformers", max_results=5)
+    assert len(papers) == 1
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_search_core_missing_key(monkeypatch):
     monkeypatch.setattr(
         config, "get_config", lambda: config.Config(

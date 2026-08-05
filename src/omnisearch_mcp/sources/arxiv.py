@@ -5,13 +5,21 @@ No API key required; please be polite (<= 1 request per ~3 seconds).
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import xml.etree.ElementTree as ET
 
 import httpx
 
-from ..config import CONFIG
+from ..config import get_config
 from ..models import Paper
+
+log = logging.getLogger("omnisearch_mcp")
+
+# Retry config for 429 / 503 rate-limit responses
+_MAX_RETRIES = 2
+_RETRY_BACKOFF = 3.0  # seconds; arXiv asks for <=1 req/3s
 
 API_URL = "https://export.arxiv.org/api/query"
 NS = {
@@ -83,9 +91,17 @@ async def search_arxiv(query: str, max_results: int = 10) -> list[Paper]:
         "sortBy": "relevance",
         "sortOrder": "descending",
     }
+    cfg = get_config()
     async with httpx.AsyncClient(
-        timeout=30.0, headers={"User-Agent": CONFIG.user_agent}
+        timeout=30.0, headers={"User-Agent": cfg.user_agent}
     ) as client:
-        resp = await client.get(API_URL, params=params)
-        resp.raise_for_status()
-        return parse_arxiv_atom(resp.text)
+        for attempt in range(_MAX_RETRIES + 1):
+            resp = await client.get(API_URL, params=params)
+            if resp.status_code in (429, 503) and attempt < _MAX_RETRIES:
+                wait = _RETRY_BACKOFF * (2 ** attempt)
+                log.warning("arxiv: %d rate-limited, retrying in %.1fs (attempt %d/%d)", resp.status_code, wait, attempt + 1, _MAX_RETRIES)
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return parse_arxiv_atom(resp.text)
+    return []  # unreachable, but satisfies type checker

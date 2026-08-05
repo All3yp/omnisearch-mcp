@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from ..config import CONFIG
+from ..config import get_config
 from ..models import Paper
 
 API_URL = "https://api.crossref.org/works"
@@ -68,8 +68,9 @@ def _to_paper(item: dict[str, Any], source: str) -> Paper:
 
 
 async def _query(params: dict[str, Any]) -> list[dict[str, Any]]:
+    cfg = get_config()
     async with httpx.AsyncClient(
-        timeout=30.0, headers={"User-Agent": CONFIG.user_agent}
+        timeout=30.0, headers={"User-Agent": cfg.user_agent}
     ) as client:
         resp = await client.get(API_URL, params=params)
         resp.raise_for_status()
@@ -98,8 +99,9 @@ async def get_doi_metadata(doi: str) -> Paper | None:
     if not doi:
         return None
     url = f"{API_URL}/{doi}"
+    cfg = get_config()
     async with httpx.AsyncClient(
-        timeout=30.0, headers={"User-Agent": CONFIG.user_agent}
+        timeout=30.0, headers={"User-Agent": cfg.user_agent}
     ) as client:
         resp = await client.get(url)
         if resp.status_code == 404:

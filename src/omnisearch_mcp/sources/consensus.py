@@ -8,15 +8,16 @@ import httpx
 from .. import config
 from ..models import Paper
 
-# Note: This uses Consensus internal API which might change. 
+# Note: This uses Consensus internal API which might change.
 API_URL = "https://consensus.app/api/v1/search/"
 
 
 class ConsensusAuthMissingError(RuntimeError):
-    def __init__(self) -> None:
+    def __init__(self, message: str | None = None) -> None:
         super().__init__(
-            "CONSENSUS_COOKIES is not set or expired. Please run `uv run omnisearch-consensus-login` to authenticate "
-            "e capturar os cookies logados."
+            message
+            or "CONSENSUS_COOKIES is not set or expired. Please run `uv run omnisearch-consensus-login` "
+            "to authenticate and capture logged-in cookies."
         )
 
 
@@ -73,6 +74,6 @@ async def search_consensus(query: str, max_results: int = 10) -> list[Paper]:
             data = resp.json()
         except Exception:
             raise ConsensusAuthMissingError("CONSENSUS_COOKIES is expired or invalid. Received HTML response instead of JSON. Please run 'uv run omnisearch-consensus-login' to authenticate.")
-        
+
         results = data.get("results", []) or data.get("papers", [])
         return [_to_paper(item) for item in results]

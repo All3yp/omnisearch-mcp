@@ -17,6 +17,8 @@ from omnisearch_mcp.server import (
     search_acm,
     search_crossref,
     get_doi_metadata,
+    resolve_oa_url,
+    download_paper,
     index_pdf_library,
     search_pdf_library,
     read_pdf_text,
@@ -39,12 +41,58 @@ async def test_tools_registered():
         "search_consensus",
         "search_all",
         "get_doi_metadata",
+        "resolve_oa_url",
+        "download_paper",
+        "read_paper_content",
         "index_pdf_library",
         "search_pdf_library",
         "read_pdf_text",
     }
     missing = expected - names
     assert not missing, f"Missing tools: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_read_paper_content(tmp_path, monkeypatch):
+    from omnisearch_mcp import config
+    from omnisearch_mcp.server import read_paper_content
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+    import io
+
+    # Create a real PDF with text
+    pdf_path = tmp_path / "Test_Paper.pdf"
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    c.drawString(100, 750, "This is a test paper about quantum computing.")
+    c.drawString(100, 730, "Quantum computers use qubits.")
+    c.save()
+    with open(pdf_path, "wb") as f:
+        f.write(buffer.getvalue())
+
+    # Mock config
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="test@example.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    ))
+
+    # Mock download to use our test PDF (target where it's imported in reader.py)
+    async def mock_download(*args, **kwargs):
+        return str(pdf_path), "direct", None
+    monkeypatch.setattr("omnisearch_mcp.reader.download_with_fallback", mock_download)
+
+    result = await read_paper_content(
+        doi="10.1234/test",
+        title="Test Paper",
+        save_path=str(tmp_path)
+    )
+
+    assert result["path"] == str(pdf_path)
+    assert result["error"] is None
+    assert "quantum" in result["text"].lower()
+    assert result["characters"] > 0
+    assert result["pages"] == 1
 
 
 @pytest.mark.asyncio
@@ -57,6 +105,10 @@ async def test_search_scite_missing_auth(monkeypatch):
     ))
     res = await search_scite("quantum")
     assert "error" in res
+    assert res["auth_required"] is True
+    assert res["action"] == "human_relogin_required"
+    assert res["provider"] == "scite"
+    assert "Stop retrying" in res["agent_instruction"]
     assert res["results"] == []
 
 
@@ -70,6 +122,9 @@ async def test_search_consensus_missing_auth(monkeypatch):
     ))
     res = await search_consensus("quantum")
     assert "error" in res
+    assert res["auth_required"] is True
+    assert res["action"] == "human_relogin_required"
+    assert res["provider"] == "consensus"
     assert res["results"] == []
 
 
@@ -83,6 +138,9 @@ async def test_search_ieee_missing_auth(monkeypatch):
     ))
     res = await search_ieee("quantum")
     assert "error" in res
+    assert res["auth_required"] is True
+    assert res["provider"] == "ieee"
+    assert "omnisearch-capes-login" in res["command"]
     assert res["results"] == []
 
 
@@ -226,6 +284,273 @@ async def test_search_all_aggregated(monkeypatch):
     assert "core" in all_res
     assert "scite" in all_res
     assert "consensus" in all_res
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_all_reports_auth_required_sources(monkeypatch):
+    from omnisearch_mcp import config
+
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    ))
+    respx.get("https://export.arxiv.org/api/query").mock(
+        return_value=httpx.Response(200, text="""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>""")
+    )
+    respx.get("https://api.crossref.org/works").mock(
+        return_value=httpx.Response(200, json={"message": {"items": []}})
+    )
+    respx.get("https://api.semanticscholar.org/graph/v1/paper/search").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+
+    res = await search_all("quantum", max_results_each=1)
+    assert set(res["auth_required_sources"]) == {"ieee", "scite", "consensus"}
+    assert "do not retry" in res["agent_instruction"]
+    assert res["ieee"]["action"] == "human_relogin_required"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_resolve_oa_url(monkeypatch):
+    from omnisearch_mcp import config
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="test@example.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    ))
+    respx.get("https://api.unpaywall.org/v2/10.1234/test").mock(
+        return_value=httpx.Response(200, json={
+            "best_oa_location": {"url_for_pdf": "https://example.com/paper.pdf"}
+        })
+    )
+    res = await resolve_oa_url("10.1234/test")
+    assert res["url"] == "https://example.com/paper.pdf"
+    assert res["source"] == "unpaywall"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_resolve_oa_url_not_found(monkeypatch):
+    from omnisearch_mcp import config
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="test@example.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    ))
+    respx.get("https://api.unpaywall.org/v2/10.1234/missing").mock(
+        return_value=httpx.Response(404, json={})
+    )
+    res = await resolve_oa_url("10.1234/missing")
+    assert res["url"] is None
+    assert res["source"] == "none"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_paper_with_direct_url(tmp_path, monkeypatch):
+    from omnisearch_mcp import config
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="test@example.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    ))
+    pdf_content = b"%PDF-1.4\nfake pdf content"
+    respx.get("https://example.com/paper.pdf").mock(
+        return_value=httpx.Response(200, content=pdf_content, headers={"content-type": "application/pdf"})
+    )
+    res = await download_paper(
+        doi="10.1234/test",
+        title="Test Paper",
+        pdf_url="https://example.com/paper.pdf",
+        save_path=str(tmp_path)
+    )
+    assert res["path"] is not None
+    assert res["source"] == "direct"
+    assert res["error"] is None
+    assert "Test_Paper.pdf" in res["path"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_paper_with_unpaywall_fallback(tmp_path, monkeypatch):
+    from omnisearch_mcp import config
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="test@example.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    ))
+    pdf_content = b"%PDF-1.4\nfake pdf content"
+    respx.get("https://api.unpaywall.org/v2/10.1234/test").mock(
+        return_value=httpx.Response(200, json={
+            "best_oa_location": {"url_for_pdf": "https://example.com/oa-paper.pdf"}
+        })
+    )
+    respx.get("https://example.com/oa-paper.pdf").mock(
+        return_value=httpx.Response(200, content=pdf_content, headers={"content-type": "application/pdf"})
+    )
+    res = await download_paper(
+        doi="10.1234/test",
+        title="OA Paper",
+        pdf_url=None,
+        save_path=str(tmp_path)
+    )
+    assert res["path"] is not None
+    assert res["source"] == "unpaywall"
+    assert res["error"] is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_paper_with_core_repository_fallback(tmp_path, monkeypatch):
+    from omnisearch_mcp import config
+
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="test@example.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key="corekey", scite_cookies=None, consensus_cookies=None
+    ))
+    respx.get("https://api.unpaywall.org/v2/10.1234/core").mock(
+        return_value=httpx.Response(404, json={})
+    )
+    respx.get("https://api.core.ac.uk/v3/search/works").mock(
+        return_value=httpx.Response(200, json={"results": [{
+            "title": "Core Paper",
+            "downloadUrl": "https://core.example/paper.pdf",
+        }]})
+    )
+    respx.get("https://core.example/paper.pdf").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"%PDF-1.4\nfake",
+            headers={"content-type": "application/pdf"},
+        )
+    )
+    res = await download_paper(
+        doi="10.1234/core",
+        title="Core Paper",
+        save_path=str(tmp_path),
+    )
+    assert res["path"] is not None
+    assert res["source"] == "core"
+    assert res["error"] is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_all_deduplication(monkeypatch):
+    from omnisearch_mcp import config
+    fake_config = config.Config(
+        ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    )
+    monkeypatch.setattr(config, "get_config", lambda: fake_config)
+
+    # Same paper in multiple sources with same DOI
+    respx.get("https://export.arxiv.org/api/query").mock(
+        return_value=httpx.Response(200, text="""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Duplicate Paper</title><id>arXiv:1234.5678</id><published>2024-01-01T00:00:00Z</published></entry></feed>""")
+    )
+    respx.get("https://api.crossref.org/works").mock(
+        return_value=httpx.Response(200, json={"message": {"items": [{"title": ["Duplicate Paper"], "DOI": "10.1234/test"}]}})
+    )
+
+    all_res = await search_all("duplicate", max_results_each=1)
+    assert "papers" in all_res
+    assert "total" in all_res
+    # Should have deduplicated papers
+    assert all_res["total"] <= 2  # At most 2 unique papers
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_paper_rejects_html(tmp_path):
+    respx.get("https://example.com/not-pdf").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html>not a pdf</html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    res = await download_paper(
+        doi="",
+        title="Not PDF",
+        pdf_url="https://example.com/not-pdf",
+        save_path=str(tmp_path),
+    )
+    assert res["path"] is None
+    assert res["source"] == "none"
+    assert res["error"] is not None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_paper_with_scihub_fallback(tmp_path, monkeypatch):
+    from omnisearch_mcp import config
+
+    monkeypatch.setattr(config, "get_config", lambda: config.Config(
+        ieee_api_key=None, contact_email="test@example.com", user_agent="agent",
+        capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+        core_api_key=None, scite_cookies=None, consensus_cookies=None
+    ))
+    respx.get("https://api.unpaywall.org/v2/10.1234/paywalled").mock(
+        return_value=httpx.Response(404, json={})
+    )
+    respx.get("https://sci-hub.se/10.1234/paywalled").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><embed src="/downloads/paywalled.pdf"></html>',
+            headers={"content-type": "text/html"},
+        )
+    )
+    respx.get("https://sci-hub.se/downloads/paywalled.pdf").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"%PDF-1.4\nfake",
+            headers={"content-type": "application/pdf"},
+        )
+    )
+    res = await download_paper(
+        doi="10.1234/paywalled",
+        title="Paywalled Paper",
+        save_path=str(tmp_path),
+        use_scihub=True,
+    )
+    assert res["path"] is not None
+    assert res["source"] == "scihub"
+    assert res["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_read_paper_content_extraction_failure(tmp_path, monkeypatch):
+    from omnisearch_mcp.server import read_paper_content
+
+    bad_pdf = tmp_path / "Bad_Paper.pdf"
+    bad_pdf.write_bytes(b"%PDF-bad")
+
+    async def mock_download(*args, **kwargs):
+        return str(bad_pdf), "direct", None
+
+    monkeypatch.setattr("omnisearch_mcp.reader.download_with_fallback", mock_download)
+
+    result = await read_paper_content(
+        doi="10.1234/bad",
+        title="Bad Paper",
+        save_path=str(tmp_path),
+    )
+    assert result["path"] == str(bad_pdf)
+    assert result["text"] == ""
+    assert result["error"] and "text extraction failed" in result["error"]
+
+
+def test_scihub_extract_pdf_url():
+    from omnisearch_mcp.scihub import SciHubFetcher
+
+    fetcher = SciHubFetcher()
+    html = '<html><iframe src="//example.org/paper.pdf?download=true"></iframe></html>'
+    assert fetcher._extract_pdf_url(html) == "//example.org/paper.pdf?download=true"
 
 
 def test_server_main():

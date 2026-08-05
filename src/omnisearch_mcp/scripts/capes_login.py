@@ -5,28 +5,100 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
 from cloakbrowser import launch_async
+
+from .session_store import (
+    context_options,
+    cookie_header,
+    save_storage_state,
+    storage_summary,
+    update_env_values,
+)
+
+
+IEEE_VALIDATION_QUERY = "machine learning"
+IEEE_VALIDATION_TIMEOUT = 20.0
+
+
+async def validate_ieee_proxy_session(
+    proxy_url: str,
+    cookie_string: str,
+    user_agent: str = "omnisearch-mcp/0.1",
+) -> tuple[bool, str]:
+    """Validate CAPES/IEEE cookies with a real IEEE frontend search request."""
+    if not proxy_url or not cookie_string:
+        return False, "missing proxy URL or cookies"
+
+    endpoint = f"{proxy_url.rstrip('/')}/rest/search"
+    payload = {
+        "newsearch": True,
+        "queryText": IEEE_VALIDATION_QUERY,
+        "returnType": "SEARCH",
+        "rowsPerPage": 1,
+    }
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": proxy_url,
+        "Referer": f"{proxy_url.rstrip('/')}/search/searchresult.jsp",
+        "Cookie": cookie_string,
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=IEEE_VALIDATION_TIMEOUT,
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            response = await client.post(endpoint, json=payload)
+    except httpx.HTTPError as exc:
+        return False, f"validation request failed: {type(exc).__name__}"
+
+    final_url = str(response.url).lower()
+    if response.status_code in (401, 403):
+        return False, f"IEEE returned HTTP {response.status_code}"
+    if "login" in final_url or ("periodicos.capes.gov.br" in final_url and "ieeexplore" not in final_url):
+        return False, "validation redirected to login/CAPES portal"
+
+    content_type = response.headers.get("content-type", "").lower()
+    body_start = response.text[:200].lower().lstrip()
+    if "html" in content_type or body_start.startswith("<!doctype") or body_start.startswith("<html"):
+        return False, "validation received HTML instead of IEEE JSON"
+
+    try:
+        data = response.json()
+    except ValueError:
+        return False, "validation response was not JSON"
+
+    if not isinstance(data, dict):
+        return False, "validation JSON was not an object"
+    if "records" not in data and "totalRecords" not in data and "totalrecords" not in data:
+        return False, "validation JSON did not look like IEEE search output"
+
+    return True, "validated"
 
 
 async def run_login_flow(headless: bool = False):
     print("Iniciando fluxo de login CAFe...")
-    
+
     # Try to get the existing proxy URL from .env, or use the Periodicos Capes portal as fallback
     env_path = Path(".env")
     env_content = ""
     if env_path.exists():
         env_content = env_path.read_text()
-        
+
     match = re.search(r"^CAPES_PROXY_URL=[\"']?(.*?)[\"']?$", env_content, flags=re.MULTILINE)
     start_url = match.group(1).strip() if match and match.group(1).strip() else "https://www.periodicos.capes.gov.br/"
-    
+
     print("Iniciando fluxo de login CAFe com CloakBrowser...")
     browser_path = os.getenv("PLAYWRIGHT_BROWSER_PATH")
     if browser_path and not os.path.exists(browser_path):
         browser_path = None
 
     browser = await launch_async(headless=headless, humanize=True)
-    context = await browser.new_context()
+    context = await browser.new_context(**context_options("capes_ieee"))
     page = await context.new_page()
 
     print(f"Navegando para {start_url}")
@@ -58,17 +130,17 @@ async def run_login_flow(headless: bool = False):
         cafe_inst = os.getenv("CAFE_INSTITUTION_ID")
         cafe_user = os.getenv("CAFE_USERNAME")
         cafe_pass = os.getenv("CAFE_PASSWORD")
-        
+
         if cafe_inst or (cafe_user and cafe_pass):
             print("Modo de Automação Ativado. Monitorando telas de login do CAFe...")
-            
+
             async def auto_fill():
                 login_attempts = 0
                 clicked_cafe = False
                 try:
                     parsed_start = urlparse(start_url)
                     proxy_domain = parsed_start.netloc.replace("ieeexplore-ieee-org.", "")
-                    
+
                     for i in range(120): # Monitora por até 4 minutos
                         # Pega sempre a aba mais recente caso uma nova aba tenha sido aberta
                         curr_page = context.pages[-1] if context.pages else page
@@ -77,7 +149,7 @@ async def run_login_flow(headless: bool = False):
                         if "ieeexplore" in current_url and proxy_domain in current_url:
                             print("Sucesso! ieeexplore no proxy detectado.")
                             break
-                        
+
                         if proxy_domain in current_url and "ieeexplore" not in current_url:
                             print(f"Login efetuado! Redirecionando para {start_url}")
                             try:
@@ -133,17 +205,17 @@ async def run_login_flow(headless: bool = False):
                                     await inst_input.click()
                                     await inst_input.fill(cafe_inst)
                                     await curr_page.wait_for_timeout(1000)
-                                    
+
                                     # Seleciona o item da lista correspondente
                                     opt = curr_page.get_by_text(cafe_inst, exact=False).first
                                     if await opt.is_visible():
                                         await opt.click()
                                         await curr_page.wait_for_timeout(1000)
-                                    
+
                                     sub_env = curr_page.get_by_role('button', name='Enviar').first
                                     if not await sub_env.is_visible():
                                         sub_env = curr_page.locator('button:has-text("Enviar"), input[type="submit"]').first
-                                    
+
                                     if await sub_env.is_visible():
                                         await sub_env.click()
                                         await curr_page.wait_for_timeout(3000)
@@ -154,7 +226,7 @@ async def run_login_flow(headless: bool = False):
                         if cafe_user and cafe_pass and login_attempts < 3:
                             user_field = curr_page.locator('input[name*="user" i], input[name*="username" i], input[id*="user" i]').first
                             pass_field = curr_page.locator('input[type="password"]').first
-                            
+
                             if await user_field.is_visible() and await pass_field.is_visible():
                                 current_user_val = await user_field.input_value()
                                 if not current_user_val:
@@ -162,7 +234,7 @@ async def run_login_flow(headless: bool = False):
                                     await user_field.fill(cafe_user)
                                     await pass_field.fill(cafe_pass)
                                     login_attempts += 1
-                                    
+
                                     sub_btn = curr_page.locator('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Entrar")').first
                                     if await sub_btn.is_visible():
                                         await sub_btn.click()
@@ -175,33 +247,52 @@ async def run_login_flow(headless: bool = False):
             await auto_fill()
             print("Login detectado com sucesso!")
 
+    active_page = context.pages[-1] if context.pages else page
+    active_url = active_page.url.lower()
+    if "ieeexplore" not in active_url or "login" in active_url:
+        print("Login CAPES/IEEE não validado. Ação humana necessária: execute `uv run omnisearch-capes-login` em modo visível, conclua MFA/CAPTCHA/SSO no navegador e tente a busca novamente uma vez.")
+        await browser.close()
+        return
+
     cookies = await context.cookies()
-    cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-    
-    parsed = urlparse(page.url)
+    cookie_string = cookie_header(cookies)
+
+    parsed = urlparse(active_page.url)
     capes_proxy_url = f"{parsed.scheme}://{parsed.netloc}"
-    
-    await browser.close()
 
     if not cookie_string:
+        await browser.close()
         print("Nenhum cookie capturado.")
         return
 
-    print("Cookies capturados!")
+    user_agent = os.getenv("USER_AGENT", "omnisearch-mcp/0.1")
+    is_valid, validation_reason = await validate_ieee_proxy_session(
+        capes_proxy_url, cookie_string, user_agent
+    )
+    if not is_valid:
+        await browser.close()
+        print(
+            "Sessão CAPES/IEEE não validada no endpoint /rest/search. "
+            f"Motivo: {validation_reason}. "
+            "Ação humana necessária: execute `uv run omnisearch-capes-login` em modo visível, "
+            "conclua MFA/CAPTCHA/SSO no navegador e tente a busca novamente uma vez."
+        )
+        return
+
+    await save_storage_state(context, "capes_ieee")
+    await browser.close()
+
+    print(f"Cookies capturados: {storage_summary(cookies)}")
     print(f"Proxy detectado: {capes_proxy_url}")
-    
-    if re.search(r"^IEEE_COOKIES=.*$", env_content, flags=re.MULTILINE):
-        env_content = re.sub(r"^IEEE_COOKIES=.*$", f"IEEE_COOKIES=\"{cookie_string}\"", env_content, flags=re.MULTILINE)
-    else:
-        env_content += f"\nIEEE_COOKIES=\"{cookie_string}\"\n"
-        
-    if re.search(r"^CAPES_PROXY_URL=.*$", env_content, flags=re.MULTILINE):
-        env_content = re.sub(r"^CAPES_PROXY_URL=.*$", f"CAPES_PROXY_URL=\"{capes_proxy_url}\"", env_content, flags=re.MULTILINE)
-    else:
-        env_content += f"\nCAPES_PROXY_URL=\"{capes_proxy_url}\"\n"
-        
-    env_path.write_text(env_content)
-    print(f"Cookies e Proxy salvos com sucesso em {env_path.absolute()}")
+
+    update_env_values(
+        env_path,
+        {
+            "IEEE_COOKIES": cookie_string,
+            "CAPES_PROXY_URL": capes_proxy_url,
+        },
+    )
+    print(f"Sessão do navegador, cookies e proxy salvos com sucesso em {env_path.absolute()}")
 
 
 def main():

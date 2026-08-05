@@ -7,7 +7,7 @@ def test_config_from_env(monkeypatch):
     monkeypatch.setenv("CONSENSUS_COOKIES", "test_consensus_cookie")
     monkeypatch.setenv("IEEE_XPLORE_API_KEY", "ieee_key")
     monkeypatch.setenv("CORE_API_KEY", "core_key")
-    
+
     cfg = Config.from_env()
     assert cfg.contact_email == "test@domain.com"
     assert "test@domain.com" in cfg.user_agent
