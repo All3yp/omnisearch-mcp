@@ -36,3 +36,5 @@ e2e/*
 uv.lock
 .coverage
 .pytest_cache
+*bak*
+.ide/launch.json
