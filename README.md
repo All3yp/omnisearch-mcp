@@ -152,7 +152,7 @@ Se seu cliente Codex usar JSON em vez de TOML, use:
 | Tool | Uso |
 |---|---|
 | `search_all(query, max_results_each=5)` | Busca em todas as fontes, preserva seções por fonte e retorna `papers` deduplicado + `total`. |
-| `search_ieee(query, max_results=10)` | Busca IEEE por API key ou CAPES/IEEE proxy cookies. |
+| `search_ieee(query, max_results=10)` | Busca IEEE por API key ou sessão CAPES/IEEE. A busca via navegador pagina os resultados até atingir `max_results` ou esgotar a busca. |
 | `search_arxiv(query, max_results=10)` | Busca arXiv aberta com retry para rate-limit. |
 | `search_acm(query, max_results=10)` | Busca ACM via CrossRef metadata. |
 | `search_crossref(query, max_results=10)` | Busca CrossRef. |
@@ -191,7 +191,11 @@ Payload mínimo:
 
 Só salva se o endpoint retornar JSON compatível com IEEE. Se receber HTML/login/401/403/redirect, não salva e pede relogin humano.
 
-O adapter `search_ieee` usa o mesmo endpoint `/rest/search`; não automatiza browser para pesquisar.
+Quando não há `IEEE_XPLORE_API_KEY`, o adapter `search_ieee` usa uma sessão CAPES/IEEE persistida no navegador. Ele seleciona até 50 itens por página e avança pelas páginas até atingir `max_results` ou esgotar os resultados da IEEE.
+
+## Skill para agentes consumidores
+
+Agentes que usam este MCP devem seguir [`.github/skills/omnisearch-mcp/SKILL.md`](.github/skills/omnisearch-mcp/SKILL.md). A skill documenta o contrato das tools, limites por fonte, formato dos resultados, autenticação e a responsabilidade do agente chamador por qualquer síntese ou saída estruturada.
 
 ## Instruções para agentes quando auth falhar
 

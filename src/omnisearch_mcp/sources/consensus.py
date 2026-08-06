@@ -7,6 +7,7 @@ import httpx
 
 from .. import config
 from ..models import Paper
+from ..scripts.session_store import persisted_cookie_header
 
 # Note: This uses Consensus internal API which might change.
 API_URL = "https://consensus.app/api/v1/search/"
@@ -51,13 +52,14 @@ def _to_paper(item: dict[str, Any]) -> Paper:
 
 async def search_consensus(query: str, max_results: int = 10) -> list[Paper]:
     cfg = config.get_config()
-    if not cfg.consensus_cookies:
+    cookies = persisted_cookie_header("consensus") or cfg.consensus_cookies
+    if not cookies:
         raise ConsensusAuthMissingError()
 
     headers = {
         "User-Agent": cfg.user_agent,
         "Accept": "application/json",
-        "Cookie": cfg.consensus_cookies,
+        "Cookie": cookies,
     }
 
     params = {

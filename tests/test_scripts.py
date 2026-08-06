@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 
 from omnisearch_mcp.scripts import capes_login, scite_login, consensus_login
+from omnisearch_mcp.scripts.session_store import persisted_cookie_header
 
 
 async def _async_noop(*args, **kwargs):
@@ -317,6 +318,21 @@ async def test_consensus_login_flow(mock_playwright_page, tmp_path, monkeypatch)
     content = env_file.read_text()
     assert "CONSENSUS_COOKIES=" in content
     assert "consensus_sess=xyz" in content
+
+
+def test_persisted_cookie_header_ignores_expired_cookies(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    session_path = tmp_path / ".omnisearch" / "sessions" / "consensus.storage.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        '{"cookies": ['
+        '{"name":"expired","value":"old","expires":1},'
+        '{"name":"active","value":"new","expires":0}'
+        ']}',
+        encoding="utf-8",
+    )
+
+    assert persisted_cookie_header("consensus") == "active=new"
 
 
 def test_main_cli_args(monkeypatch):

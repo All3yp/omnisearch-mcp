@@ -243,6 +243,22 @@ async def test_search_ieee_with_key(monkeypatch):
     assert papers[0].source == "ieee"
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_ieee_418_requires_relogin(monkeypatch):
+    monkeypatch.setattr(
+        config, "get_config", lambda: config.Config(
+            ieee_api_key="fake-key", contact_email="a@b.com", user_agent="agent",
+            capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+            core_api_key=None, scite_cookies=None, consensus_cookies=None
+        )
+    )
+    respx.get(IEEE_URL).mock(return_value=httpx.Response(418))
+
+    with pytest.raises(IEEEKeyMissingError, match="HTTP 418"):
+        await search_ieee("anything")
+
+
 def test_parse_ieee_advanced_search_html():
     html = """
     <html><body>

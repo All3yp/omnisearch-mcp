@@ -23,6 +23,7 @@ from ..scripts.session_store import context_options
 API_URL = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
 IEEE_BASE_URL = "https://ieeexplore.ieee.org"
 IEEE_BROWSER_RESULTS_PER_PAGE = 50
+IEEE_ACCESS_DENIED_STATUS_CODES = {401, 403, 418}
 
 
 class IEEEKeyMissingError(RuntimeError):
@@ -34,6 +35,15 @@ class IEEEKeyMissingError(RuntimeError):
             or "IEEE_XPLORE_API_KEY is not set, and no CAPES_PROXY_URL or IEEE_COOKIES "
             "are provided. Please authenticate with CAPES/IEEE or configure an IEEE key."
         )
+
+
+def _raise_for_ieee_status(response: httpx.Response) -> None:
+    if response.status_code in IEEE_ACCESS_DENIED_STATUS_CODES:
+        raise IEEEKeyMissingError(
+            f"IEEE access was denied with HTTP {response.status_code}. "
+            "Please run 'uv run omnisearch-capes-login' and complete IEEE access manually."
+        )
+    response.raise_for_status()
 
 
 def _to_paper(item: dict[str, Any]) -> Paper:
@@ -291,7 +301,7 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
             timeout=30.0, headers={"User-Agent": cfg.user_agent}
         ) as client:
             resp = await client.get(API_URL, params=params)
-            resp.raise_for_status()
+            _raise_for_ieee_status(resp)
             return parse_ieee_response(resp.json())
 
     # 2. Fallback to browser scraping through the CAPES proxy.

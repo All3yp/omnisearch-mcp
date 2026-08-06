@@ -36,6 +36,7 @@ async def run_login_flow(headless: bool = False):
             try:
                 # Preenche email
                 email_input = page.locator('input[type="email"], input[name="email"], input[placeholder*="Email" i]').first
+                await email_input.wait_for(state="visible", timeout=15_000)
                 await email_input.fill(consensus_email)
 
                 # Clica em Next
@@ -51,6 +52,7 @@ async def run_login_flow(headless: bool = False):
 
                 # Preenche senha
                 pass_input = page.locator('input[type="password"], input[name="password"]').first
+                await pass_input.wait_for(state="visible", timeout=15_000)
                 await pass_input.fill(consensus_pass)
 
                 # Clica em Sign in

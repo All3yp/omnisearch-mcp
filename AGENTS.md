@@ -3,6 +3,10 @@
 ## Project Overview
 `omnisearch-mcp` is a FastMCP server exposing tools for searching academic papers across multiple search providers (IEEE Xplore, arXiv, ACM, CrossRef, Semantic Scholar, CORE, Scite.ai, Consensus.app) and local PDF libraries.
 
+## MCP Consumer Skill
+
+Agents that call this server must read [`.github/skills/omnisearch-mcp/SKILL.md`](.github/skills/omnisearch-mcp/SKILL.md). It defines the tool contract, result shape, provider limits, authentication recovery, IEEE pagination, and the responsibility of the calling agent to produce any required structured synthesis.
+
 ---
 
 ## Agent Usage & Error Recovery Protocol

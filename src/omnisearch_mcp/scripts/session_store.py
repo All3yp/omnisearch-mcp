@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -50,6 +51,27 @@ def cookie_header(cookies: Sequence[Mapping[str, Any]]) -> str:
         if name:
             pairs.append(f"{name}={value}")
     return "; ".join(pairs)
+
+
+def persisted_cookie_header(provider: str) -> str | None:
+    """Return non-expired cookies from a provider's persisted browser state."""
+    path = storage_state_path(provider)
+    if not path.exists():
+        return None
+
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    now = time.time()
+    cookies = [
+        cookie
+        for cookie in state.get("cookies", [])
+        if not cookie.get("expires") or cookie["expires"] > now
+    ]
+    header = cookie_header(cookies)
+    return header or None
 
 
 def dotenv_quote(value: str) -> str:
