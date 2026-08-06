@@ -22,6 +22,7 @@ from ..scripts.session_store import context_options
 
 API_URL = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
 IEEE_BASE_URL = "https://ieeexplore.ieee.org"
+IEEE_BROWSER_RESULTS_PER_PAGE = 50
 
 
 class IEEEKeyMissingError(RuntimeError):
@@ -179,6 +180,22 @@ def parse_ieee_advanced_search_html(html: str, proxy_url: str, max_results: int)
     return papers
 
 
+def _append_unique_papers(
+    papers: list[Paper],
+    page_papers: list[Paper],
+    max_results: int,
+) -> None:
+    seen_document_ids = {paper.identifiers.get("article_number") for paper in papers}
+    for paper in page_papers:
+        document_id = paper.identifiers.get("article_number")
+        if document_id in seen_document_ids:
+            continue
+        papers.append(paper)
+        seen_document_ids.add(document_id)
+        if len(papers) >= max_results:
+            return
+
+
 async def search_ieee_with_browser(query: str, max_results: int, proxy_url: str) -> list[Paper]:
     browser = await launch_async(headless=False, humanize=True)
     context = await browser.new_context(**context_options("capes_ieee"))
@@ -211,8 +228,48 @@ async def search_ieee_with_browser(query: str, max_results: int, proxy_url: str)
             await page.wait_for_selector('a[href*="/document/"]', timeout=30_000)
         except PlaywrightTimeoutError:
             pass
-        html = await page.content()
-        return parse_ieee_advanced_search_html(html, proxy_url, max(1, min(max_results, 100)))
+        if max_results > 25:
+            items_per_page = page.get_by_role("button", name="Items Per Page")
+            if await items_per_page.is_visible():
+                await items_per_page.click()
+                fifty_items = page.locator("button.dropdown-item", has_text="50").first
+                if await fifty_items.is_visible():
+                    await fifty_items.click()
+                    try:
+                        await page.wait_for_function(
+                            """() => document.querySelectorAll('a[href*='/document/']').length >= 50""",
+                            timeout=10_000,
+                        )
+                    except PlaywrightTimeoutError:
+                        pass
+        result_limit = max(1, max_results)
+        papers: list[Paper] = []
+        while len(papers) < result_limit:
+            html = await page.content()
+            _append_unique_papers(
+                papers,
+                parse_ieee_advanced_search_html(html, proxy_url, result_limit - len(papers)),
+                result_limit,
+            )
+            if len(papers) >= result_limit:
+                break
+
+            next_page = page.locator(
+                'button[aria-label*="Next" i], a[aria-label*="Next" i], button:has-text("Next")'
+            ).first
+            if not await next_page.is_visible() or await next_page.get_attribute("aria-disabled") == "true":
+                break
+
+            await next_page.click()
+            try:
+                await page.wait_for_function(
+                    "previousHtml => document.documentElement.innerHTML !== previousHtml",
+                    arg=html,
+                    timeout=15_000,
+                )
+            except PlaywrightTimeoutError:
+                break
+        return papers
     finally:
         await browser.close()
 

@@ -16,6 +16,7 @@ from omnisearch_mcp.sources.crossref import (
 from omnisearch_mcp.sources.ieee import (
     API_URL as IEEE_URL,
     IEEEKeyMissingError,
+    _append_unique_papers,
     parse_ieee_advanced_search_html,
     parse_ieee_response,
     parse_ieee_frontend_response,
@@ -258,6 +259,47 @@ def test_parse_ieee_advanced_search_html():
     assert papers[0].url == "https://capes.proxy.example.com/document/1234567/"
     assert papers[0].identifiers["article_number"] == "1234567"
     assert papers[1].title == "Second IEEE Paper"
+
+
+def test_parse_ieee_advanced_search_html_respects_result_limit():
+    html = "".join(
+        f'<a href="/document/{number}">Paper {number}</a>'
+        for number in range(1000000, 1000004)
+    )
+
+    papers = parse_ieee_advanced_search_html(html, "https://capes.proxy.example.com", 2)
+
+    assert [paper.identifiers["article_number"] for paper in papers] == [
+        "1000000",
+        "1000001",
+    ]
+
+
+def test_append_unique_ieee_papers_stops_at_result_limit():
+    first_page = parse_ieee_advanced_search_html(
+        ''.join(
+            f'<a href="/document/{number}">Paper {number}</a>'
+            for number in range(1000000, 1000002)
+        ),
+        "https://capes.proxy.example.com",
+        2,
+    )
+    next_page = parse_ieee_advanced_search_html(
+        ''.join(
+            f'<a href="/document/{number}">Paper {number}</a>'
+            for number in range(1000001, 1000004)
+        ),
+        "https://capes.proxy.example.com",
+        3,
+    )
+
+    _append_unique_papers(first_page, next_page, 3)
+
+    assert [paper.identifiers["article_number"] for paper in first_page] == [
+        "1000000",
+        "1000001",
+        "1000002",
+    ]
 
 
 @pytest.mark.asyncio
