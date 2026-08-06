@@ -26,58 +26,76 @@ async def validate_ieee_proxy_session(
     cookie_string: str,
     user_agent: str = "omnisearch-mcp/0.1",
 ) -> tuple[bool, str]:
-    """Validate CAPES/IEEE cookies with a real IEEE frontend search request."""
+    """Validate CAPES/IEEE cookies with HTTP only for backwards-compatible tests."""
     if not proxy_url or not cookie_string:
         return False, "missing proxy URL or cookies"
 
-    endpoint = f"{proxy_url.rstrip('/')}/rest/search"
-    payload = {
-        "newsearch": True,
-        "queryText": IEEE_VALIDATION_QUERY,
-        "returnType": "SEARCH",
-        "rowsPerPage": 1,
-    }
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-        "Origin": proxy_url,
-        "Referer": f"{proxy_url.rstrip('/')}/search/searchresult.jsp",
-        "Cookie": cookie_string,
-    }
+    return False, "direct HTTP validation is disabled; use browser validation"
+
+
+async def validate_ieee_browser_session(page, proxy_url: str) -> tuple[bool, str]:
+    """Validate CAPES/IEEE access in the already-open browser session."""
+    if not proxy_url:
+        return False, "missing proxy URL"
 
     try:
-        async with httpx.AsyncClient(
-            timeout=IEEE_VALIDATION_TIMEOUT,
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
-            response = await client.post(endpoint, json=payload)
-    except httpx.HTTPError as exc:
-        return False, f"validation request failed: {type(exc).__name__}"
+        await page.goto(
+            f"{proxy_url.rstrip('/')}/Xplore/home.jsp",
+            wait_until="domcontentloaded",
+            timeout=30_000,
+        )
+        await page.wait_for_timeout(3000)
+    except Exception as exc:
+        return False, f"browser validation navigation failed: {type(exc).__name__}"
 
-    final_url = str(response.url).lower()
-    if response.status_code in (401, 403):
-        return False, f"IEEE returned HTTP {response.status_code}"
-    if "login" in final_url or ("periodicos.capes.gov.br" in final_url and "ieeexplore" not in final_url):
-        return False, "validation redirected to login/CAPES portal"
-
-    content_type = response.headers.get("content-type", "").lower()
-    body_start = response.text[:200].lower().lstrip()
-    if "html" in content_type or body_start.startswith("<!doctype") or body_start.startswith("<html"):
-        return False, "validation received HTML instead of IEEE JSON"
+    current_url = page.url.lower()
+    if "login" in current_url or ("periodicos.capes.gov.br" in current_url and "ieeexplore" not in current_url):
+        return False, "browser validation redirected to login/CAPES portal"
 
     try:
-        data = response.json()
-    except ValueError:
-        return False, "validation response was not JSON"
+        search_marker = page.locator(
+            'input[type="search"], button[aria-label*="Search" i], a[href="/search/advanced"]'
+        ).first
+        if await search_marker.is_visible():
+            return True, "validated"
+    except Exception:
+        pass
 
-    if not isinstance(data, dict):
-        return False, "validation JSON was not an object"
-    if "records" not in data and "totalRecords" not in data and "totalrecords" not in data:
-        return False, "validation JSON did not look like IEEE search output"
+    try:
+        html = (await page.content()).lower()
+    except Exception:
+        html = ""
 
-    return True, "validated"
+    if "unusual traffic" in html or "error 418" in html:
+        return False, "browser validation reached IEEE 418 unusual traffic page"
+    if "ieeexplore" in html or "ieee xplore" in html:
+        return True, "validated"
+
+    return False, "browser validation did not find IEEE search UI"
+
+
+async def click_first_visible(page, selectors: tuple[str, ...], label: str) -> bool:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if not await locator.is_visible():
+                continue
+            print(f"Clicando em {label} ({selector})...")
+            try:
+                await locator.click(timeout=5000)
+            except TypeError:
+                await locator.click()
+            except Exception:
+                await locator.evaluate("element => element.click()")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def current_url_changed(page, previous_url: str) -> bool:
+    await page.wait_for_timeout(500)
+    return page.url != previous_url
 
 
 async def run_login_flow(headless: bool = False):
@@ -170,28 +188,35 @@ async def run_login_flow(headless: bool = False):
 
                         # Tela 0: Clica em 'Acesso CAFe' (botão do menu + link interno)
                         if cafe_inst and not clicked_cafe and ("periodicos.capes.gov.br" in current_url and "acesso-cafe" not in current_url and "ieeexplore" not in current_url):
-                            try:
-                                btn_menu = curr_page.get_by_role('button', name='Acesso CAFe').first
-                                if await btn_menu.is_visible():
-                                    print("Clicando no menu 'Acesso CAFe'...")
-                                    await btn_menu.click()
-                                    await curr_page.wait_for_timeout(1000)
+                            opened_cafe_menu = await click_first_visible(
+                                curr_page,
+                                (
+                                    'button[aria-controls]:has-text("Acesso CAFe")',
+                                    'button[aria-expanded]:has-text("Acesso CAFe")',
+                                    'button[aria-haspopup]:has-text("Acesso CAFe")',
+                                    'button:has-text("Acesso CAFe")',
+                                    '[role="button"]:has-text("Acesso CAFe")',
+                                ),
+                                "menu Acesso CAFe",
+                            )
+                            if opened_cafe_menu:
+                                await curr_page.wait_for_timeout(1000)
 
-                                link_item = curr_page.get_by_role('link', name=' Acesso CAFe').first
-                                if await link_item.is_visible():
-                                    print("Clicando no item do menu 'Acesso CAFe'...")
-                                    clicked_cafe = True
-                                    await link_item.click()
-                                    await curr_page.wait_for_timeout(3000)
-                                else:
-                                    # Fallback genérico
-                                    cafe_fallback = curr_page.locator('a:has-text("Acesso CAFe"), a[href*="acesso-cafe"]').first
-                                    if await cafe_fallback.is_visible():
-                                        clicked_cafe = True
-                                        await cafe_fallback.click()
-                                        await curr_page.wait_for_timeout(3000)
-                            except Exception as e:
-                                print(f"Tentativa de navegação Acesso CAFe: {e}")
+                            clicked_cafe = await click_first_visible(
+                                curr_page,
+                                (
+                                    'a[href*="acesso-cafe"]',
+                                    'a[href*="Shibboleth.sso"]',
+                                    'a[href*="cafe"]:has-text("Acesso CAFe")',
+                                    '[role="menuitem"][href*="acesso-cafe"]',
+                                    '[role="menuitem"]:has-text("Acesso CAFe")',
+                                ),
+                                "link Acesso CAFe",
+                            )
+                            if clicked_cafe and await current_url_changed(curr_page, current_url):
+                                await curr_page.wait_for_timeout(3000)
+                            else:
+                                clicked_cafe = False
 
                         # Tela 1: Seleção de Instituição CAFe
                         if cafe_inst and ("acesso-cafe" in current_url or "shibboleth" in current_url or "wayf" in current_url or "instituicao" in current_url or "periodicos.capes.gov.br" in current_url):
@@ -249,30 +274,34 @@ async def run_login_flow(headless: bool = False):
 
     active_page = context.pages[-1] if context.pages else page
     active_url = active_page.url.lower()
-    if "ieeexplore" not in active_url or "login" in active_url:
-        print("Login CAPES/IEEE não validado. Ação humana necessária: execute `uv run omnisearch-capes-login` em modo visível, conclua MFA/CAPTCHA/SSO no navegador e tente a busca novamente uma vez.")
-        await browser.close()
-        return
+    active_url_looks_authenticated = "ieeexplore" in active_url and "login" not in active_url
 
     cookies = await context.cookies()
     cookie_string = cookie_header(cookies)
 
-    parsed = urlparse(active_page.url)
-    capes_proxy_url = f"{parsed.scheme}://{parsed.netloc}"
+    env_proxy_url = os.getenv("CAPES_PROXY_URL")
+    if active_url_looks_authenticated:
+        parsed = urlparse(active_page.url)
+        capes_proxy_url = f"{parsed.scheme}://{parsed.netloc}"
+    elif env_proxy_url:
+        capes_proxy_url = env_proxy_url.rstrip("/")
+    else:
+        await browser.close()
+        print("Login CAPES/IEEE não validado. Ação humana necessária: execute `uv run omnisearch-capes-login` em modo visível, conclua MFA/CAPTCHA/SSO no navegador e tente a busca novamente uma vez.")
+        return
 
     if not cookie_string:
         await browser.close()
         print("Nenhum cookie capturado.")
         return
 
-    user_agent = os.getenv("USER_AGENT", "omnisearch-mcp/0.1")
-    is_valid, validation_reason = await validate_ieee_proxy_session(
-        capes_proxy_url, cookie_string, user_agent
+    is_valid, validation_reason = await validate_ieee_browser_session(
+        active_page, capes_proxy_url
     )
     if not is_valid:
         await browser.close()
         print(
-            "Sessão CAPES/IEEE não validada no endpoint /rest/search. "
+            "Sessão CAPES/IEEE não validada na busca avançada. "
             f"Motivo: {validation_reason}. "
             "Ação humana necessária: execute `uv run omnisearch-capes-login` em modo visível, "
             "conclua MFA/CAPTCHA/SSO no navegador e tente a busca novamente uma vez."

@@ -309,6 +309,8 @@ async def test_search_all_reports_auth_required_sources(monkeypatch):
     res = await search_all("quantum", max_results_each=1)
     assert set(res["auth_required_sources"]) == {"ieee", "scite", "consensus"}
     assert "do not retry" in res["agent_instruction"]
+    assert "other configured" in res["agent_instruction"]
+    assert "configured API-backed" in res["ieee"]["agent_instruction"]
     assert res["ieee"]["action"] == "human_relogin_required"
 
 

@@ -48,7 +48,9 @@ def _auth_error_response(provider: str, command: str, error: Exception) -> dict[
         "command": command,
         "agent_instruction": (
             "Stop retrying this provider. Ask the human to run the command, "
-            "wait for login completion, then retry the same tool once."
+            "wait for login completion, then retry the same tool once. "
+            "For literature search, continue with configured API-backed/non-auth providers "
+            "instead of blocking on this provider."
         ),
         "results": [],
     }
@@ -210,7 +212,8 @@ async def search_all(query: str, max_results_each: int = 5) -> dict[str, Any]:
         "auth_required_sources": auth_required_sources,
         "agent_instruction": (
             "For sources in auth_required_sources, do not retry in a loop. "
-            "Ask the human to relogin with each section's command, wait, then retry once."
+            "Ask the human to relogin with each section's command, wait, then retry once. "
+            "Keep using the other configured API-backed/non-auth providers for the search."
             if auth_required_sources
             else None
         ),

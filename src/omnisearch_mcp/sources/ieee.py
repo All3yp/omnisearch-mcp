@@ -8,14 +8,20 @@ institutional or personal subscription.
 """
 from __future__ import annotations
 
+from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx
+from cloakbrowser import launch_async
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .. import config
 from ..models import Paper
+from ..scripts.session_store import context_options
 
 API_URL = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
+IEEE_BASE_URL = "https://ieeexplore.ieee.org"
 
 
 class IEEEKeyMissingError(RuntimeError):
@@ -113,6 +119,104 @@ def parse_ieee_frontend_response(payload: dict[str, Any]) -> list[Paper]:
     return [_to_paper_frontend(item) for item in (payload.get("records") or [])]
 
 
+class IEEEAdvancedSearchParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[dict[str, str | None]] = []
+        self._active_link: dict[str, str | None] | None = None
+        self._text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        attr_map = dict(attrs)
+        href = attr_map.get("href") or ""
+        if "/document/" not in href and "/abstract/document/" not in href:
+            return
+        self._active_link = {"href": href, "title": attr_map.get("aria-label") or attr_map.get("title")}
+        self._text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._active_link is not None:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a" or self._active_link is None:
+            return
+        text = " ".join(part.strip() for part in self._text_parts if part.strip())
+        if text and not self._active_link.get("title"):
+            self._active_link["title"] = unescape(text)
+        self.links.append(self._active_link)
+        self._active_link = None
+        self._text_parts = []
+
+
+def parse_ieee_advanced_search_html(html: str, proxy_url: str, max_results: int) -> list[Paper]:
+    parser = IEEEAdvancedSearchParser()
+    parser.feed(html)
+    papers: list[Paper] = []
+    seen_document_ids: set[str] = set()
+    ignored_titles = {"html", "pdf", "show more"}
+    for link in parser.links:
+        title = (link.get("title") or "").strip()
+        href = link.get("href") or ""
+        if not title or not href or title.lower() in ignored_titles:
+            continue
+        if "/citations" in href or "tabFilter=" in href:
+            continue
+        href_parts = [part for part in href.split("/") if part]
+        try:
+            document_id = href_parts[href_parts.index("document") + 1]
+        except (ValueError, IndexError):
+            continue
+        if not document_id.isdigit() or document_id in seen_document_ids:
+            continue
+        seen_document_ids.add(document_id)
+        url = f"{proxy_url.rstrip('/')}/document/{document_id}/"
+        papers.append(Paper(source="ieee", title=title, url=url, identifiers={"article_number": document_id}))
+        if len(papers) >= max_results:
+            break
+    return papers
+
+
+async def search_ieee_with_browser(query: str, max_results: int, proxy_url: str) -> list[Paper]:
+    browser = await launch_async(headless=False, humanize=True)
+    context = await browser.new_context(**context_options("capes_ieee"))
+    page = await context.new_page()
+    try:
+        await page.goto(f"{proxy_url.rstrip('/')}/Xplore/home.jsp", wait_until="domcontentloaded", timeout=30_000)
+        search_box = page.locator(
+            'input[type="search"], input[placeholder*="Search" i], input[aria-label*="Search" i], input[name="queryText"], input[name="query"]'
+        ).first
+        if not await search_box.is_visible():
+            await page.goto(f"{proxy_url.rstrip('/')}/search/advanced", wait_until="domcontentloaded", timeout=30_000)
+            search_box = page.locator(
+                'input[type="search"], input[placeholder*="Search" i], input[aria-label*="Search" i], input[name="queryText"], input[name="query"], textarea[name="queryText"]'
+            ).first
+        if not await search_box.is_visible():
+            raise IEEEKeyMissingError("IEEE search box was not found in the CAPES browser session. Please run 'uv run omnisearch-capes-login' and complete IEEE access manually.")
+        await search_box.fill(query)
+        search_button = page.locator(
+            'button[type="submit"], button[aria-label*="Search" i], input[type="submit"], [role="button"][aria-label*="Search" i]'
+        ).first
+        if await search_button.is_visible():
+            await search_button.click()
+        else:
+            await search_box.press("Enter")
+        try:
+            await page.wait_for_url("**/search/**", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
+        try:
+            await page.wait_for_selector('a[href*="/document/"]', timeout=30_000)
+        except PlaywrightTimeoutError:
+            pass
+        html = await page.content()
+        return parse_ieee_advanced_search_html(html, proxy_url, max(1, min(max_results, 100)))
+    finally:
+        await browser.close()
+
+
 async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
     cfg = config.get_config()
     if not cfg.ieee_api_key and not cfg.capes_proxy_url and not cfg.ieee_cookies:
@@ -133,38 +237,6 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
             resp.raise_for_status()
             return parse_ieee_response(resp.json())
 
-    # 2. Fallback to Frontend API via Proxy or Cookies
-    proxy_url = cfg.capes_proxy_url or "https://ieeexplore.ieee.org"
-    frontend_api_url = f"{proxy_url.rstrip('/')}/rest/search"
-
-    headers = {
-        "User-Agent": cfg.user_agent,
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-        "Origin": proxy_url,
-        "Referer": f"{proxy_url}/search/searchresult.jsp",
-    }
-
-    if cfg.ieee_cookies:
-        headers["Cookie"] = cfg.ieee_cookies
-
-    payload = {
-        "newsearch": True,
-        "queryText": query,
-        "highlight": True,
-        "returnFacets": ["ALL"],
-        "returnType": "SEARCH",
-        "rowsPerPage": max(1, min(max_results, 100)),
-    }
-
-    async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
-        resp = await client.post(frontend_api_url, json=payload)
-        url_str = str(resp.url).lower()
-        if resp.status_code in (301, 302, 401, 403) or "login" in url_str or ("periodicos.capes.gov.br" in url_str and "ieeexplore" not in url_str):
-            raise IEEEKeyMissingError("IEEE_COOKIES is expired or missing. Please run 'uv run omnisearch-capes-login' to authenticate.")
-        resp.raise_for_status()
-        try:
-            data = resp.json()
-        except Exception:
-            raise IEEEKeyMissingError("IEEE_COOKIES is expired or invalid. Received HTML response instead of JSON. Please run 'uv run omnisearch-capes-login' to authenticate.")
-        return parse_ieee_frontend_response(data)
+    # 2. Fallback to browser scraping through the CAPES proxy.
+    proxy_url = cfg.capes_proxy_url or IEEE_BASE_URL
+    return await search_ieee_with_browser(query, max_results, proxy_url)

@@ -4,7 +4,7 @@ import os
 import httpx
 import pytest
 import respx
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 
 from omnisearch_mcp.scripts import capes_login, scite_login, consensus_login
@@ -28,6 +28,64 @@ def _async_val(val):
     return _fn
 
 
+async def _async_raise(*args, **kwargs):
+    raise RuntimeError("click intercepted")
+
+
+@pytest.mark.asyncio
+async def test_click_first_visible_uses_first_matching_selector():
+    hidden = MagicMock()
+    hidden.is_visible = _async_false
+    visible = MagicMock()
+    visible.is_visible = _async_true
+    visible.click = AsyncMock()
+
+    page = MagicMock()
+    page.locator = MagicMock(side_effect=[MagicMock(first=hidden), MagicMock(first=visible)])
+
+    clicked = await capes_login.click_first_visible(page, ("missing", "button"), "test button")
+
+    assert clicked is True
+    visible.click.assert_called_once_with(timeout=5000)
+
+
+@pytest.mark.asyncio
+async def test_current_url_changed_detects_navigation():
+    page = MagicMock()
+    page.url = "https://acesso-cafe.capes.gov.br/login"
+    page.wait_for_timeout = _async_noop
+
+    changed = await capes_login.current_url_changed(page, "https://www.periodicos.capes.gov.br/")
+
+    assert changed is True
+
+
+@pytest.mark.asyncio
+async def test_current_url_changed_rejects_same_page_menu_click():
+    page = MagicMock()
+    page.url = "https://www.periodicos.capes.gov.br/"
+    page.wait_for_timeout = _async_noop
+
+    changed = await capes_login.current_url_changed(page, "https://www.periodicos.capes.gov.br/")
+
+    assert changed is False
+
+
+@pytest.mark.asyncio
+async def test_click_first_visible_falls_back_to_dom_click():
+    visible = MagicMock()
+    visible.is_visible = _async_true
+    visible.click = AsyncMock(side_effect=RuntimeError("click intercepted"))
+    visible.evaluate = AsyncMock()
+    page = MagicMock()
+    page.locator = MagicMock(return_value=MagicMock(first=visible))
+
+    clicked = await capes_login.click_first_visible(page, ("button",), "test button")
+
+    assert clicked is True
+    visible.evaluate.assert_called_once_with("element => element.click()")
+
+
 @pytest.fixture
 def mock_playwright_page():
     page = MagicMock()
@@ -47,6 +105,9 @@ def mock_playwright_page():
     locator_mock.first = locator_mock
 
     page.locator = MagicMock(return_value=locator_mock)
+    page.get_by_role = MagicMock(return_value=MagicMock(first=locator_mock))
+    page.get_by_placeholder = MagicMock(return_value=MagicMock(first=locator_mock))
+    page.get_by_text = MagicMock(return_value=MagicMock(first=locator_mock))
     page.get_by_test_id = MagicMock(return_value=MagicMock(get_by_role=MagicMock(return_value=MagicMock(first=locator_mock))))
     return page
 
@@ -71,18 +132,40 @@ def mock_playwright(mock_playwright_page):
 async def test_capes_login_flow_already_logged_in(mock_playwright, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     mock_playwright.context.pages[0].url = "https://ieeexplore-ieee-org.proxy.capes.gov.br/"
-    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
-        return_value=httpx.Response(200, json={"records": []})
+    respx.get("https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp").mock(
+        return_value=httpx.Response(200, text="IEEE Xplore search results")
     )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
-        await capes_login.run_login_flow(headless=True)
+        with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_browser_session", _async_val((True, "validated"))):
+            await capes_login.run_login_flow(headless=True)
 
     env_file = tmp_path / ".env"
     assert env_file.exists()
     content = env_file.read_text()
     assert "IEEE_COOKIES=" in content
     assert "fake_cookie=abc" in content
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_capes_login_flow_uses_env_proxy_for_validation(mock_playwright, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+    monkeypatch.setenv("CAPES_PROXY_URL", proxy_url)
+    (tmp_path / ".env").write_text(f"CAPES_PROXY_URL={proxy_url}\n", encoding="utf-8")
+    mock_playwright.context.pages[0].url = "https://www.periodicos.capes.gov.br/"
+    route = respx.get(f"{proxy_url}/Xplore/home.jsp").mock(
+        return_value=httpx.Response(200, text="IEEE Xplore search results")
+    )
+
+    with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
+        with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_browser_session", _async_val((True, "validated"))):
+            await capes_login.run_login_flow(headless=True)
+
+    content = (tmp_path / ".env").read_text()
+    assert f"CAPES_PROXY_URL='{proxy_url}'" in content
+    assert "IEEE_COOKIES=" in content
 
 
 @pytest.mark.asyncio
@@ -127,8 +210,8 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
     context.pages = [mock_playwright_page]
     context.new_page = _async_val(mock_playwright_page)
     browser.new_context = _async_val(context)
-    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
-        return_value=httpx.Response(200, json={"records": []})
+    respx.get("https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp").mock(
+        return_value=httpx.Response(200, text="IEEE Xplore search results")
     )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=browser):
@@ -140,41 +223,54 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_validate_ieee_proxy_session_posts_to_rest_search():
-    route = respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
-        return_value=httpx.Response(200, json={"records": []})
-    )
+async def test_validate_ieee_proxy_session_disables_direct_http():
     valid, reason = await capes_login.validate_ieee_proxy_session(
         "https://ieeexplore-ieee-org.proxy.capes.gov.br",
         "session=abc",
         "agent",
     )
-    assert valid is True
-    assert reason == "validated"
-    request = route.calls.last.request
-    assert request.headers["cookie"] == "session=abc"
-    assert request.headers["origin"] == "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+    assert valid is False
+    assert "direct HTTP validation is disabled" in reason
+    assert "session=abc" not in reason
 
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_validate_ieee_proxy_session_rejects_login_html():
-    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
-        return_value=httpx.Response(
-            200,
-            text="<html>login</html>",
-            headers={"content-type": "text/html"},
-        )
-    )
-    valid, reason = await capes_login.validate_ieee_proxy_session(
+async def test_validate_ieee_browser_session_finds_search_ui():
+    page = MagicMock()
+    page.url = "https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp"
+    page.goto = _async_noop
+    page.wait_for_timeout = _async_noop
+    marker = MagicMock()
+    marker.is_visible = _async_true
+    page.locator = MagicMock(return_value=MagicMock(first=marker))
+
+    valid, reason = await capes_login.validate_ieee_browser_session(
+        page,
         "https://ieeexplore-ieee-org.proxy.capes.gov.br",
-        "session=secret-value",
-        "agent",
     )
+
+    assert valid is True
+    assert reason == "validated"
+
+
+@pytest.mark.asyncio
+async def test_validate_ieee_browser_session_rejects_418():
+    page = MagicMock()
+    page.url = "https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp"
+    page.goto = _async_noop
+    page.wait_for_timeout = _async_noop
+    marker = MagicMock()
+    marker.is_visible = _async_false
+    page.locator = MagicMock(return_value=MagicMock(first=marker))
+    page.content = _async_val("Unusual Traffic Detected (Error 418)")
+
+    valid, reason = await capes_login.validate_ieee_browser_session(
+        page,
+        "https://ieeexplore-ieee-org.proxy.capes.gov.br",
+    )
+
     assert valid is False
-    assert "HTML" in reason
-    assert "secret-value" not in reason
+    assert "418" in reason
 
 
 @pytest.mark.asyncio

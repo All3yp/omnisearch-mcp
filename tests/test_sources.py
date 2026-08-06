@@ -16,6 +16,7 @@ from omnisearch_mcp.sources.crossref import (
 from omnisearch_mcp.sources.ieee import (
     API_URL as IEEE_URL,
     IEEEKeyMissingError,
+    parse_ieee_advanced_search_html,
     parse_ieee_response,
     parse_ieee_frontend_response,
     search_ieee,
@@ -241,9 +242,26 @@ async def test_search_ieee_with_key(monkeypatch):
     assert papers[0].source == "ieee"
 
 
+def test_parse_ieee_advanced_search_html():
+    html = """
+    <html><body>
+      <a href="/document/1234567" aria-label="Advanced IEEE Paper">ignored</a>
+      <a href="/document/1234567" aria-label="Advanced IEEE Paper">duplicate</a>
+      <a href="/document/7654321">Second IEEE Paper</a>
+    </body></html>
+    """
+
+    papers = parse_ieee_advanced_search_html(html, "https://capes.proxy.example.com", 10)
+
+    assert len(papers) == 2
+    assert papers[0].title == "Advanced IEEE Paper"
+    assert papers[0].url == "https://capes.proxy.example.com/document/1234567/"
+    assert papers[0].identifiers["article_number"] == "1234567"
+    assert papers[1].title == "Second IEEE Paper"
+
+
 @pytest.mark.asyncio
-@respx.mock
-async def test_search_ieee_frontend_proxy_fallback(monkeypatch):
+async def test_search_ieee_browser_proxy_fallback(monkeypatch):
     proxy_url = "https://capes.proxy.example.com"
     monkeypatch.setattr(
         config, "get_config", lambda: config.Config(
@@ -253,13 +271,25 @@ async def test_search_ieee_frontend_proxy_fallback(monkeypatch):
             core_api_key=None, scite_cookies=None, consensus_cookies=None
         )
     )
-    respx.post(f"{proxy_url}/rest/search").mock(
-        return_value=httpx.Response(200, json=IEEE_FRONTEND_FIXTURE)
-    )
+    called = {}
+
+    async def fake_browser_search(query, max_results, proxy):
+        called["query"] = query
+        called["max_results"] = max_results
+        called["proxy"] = proxy
+        return [parse_ieee_advanced_search_html(
+            '<html><body>IEEE Xplore <a href="/document/1234567">Advanced IEEE Paper</a></body></html>',
+            proxy,
+            max_results,
+        )[0]]
+
+    monkeypatch.setattr("omnisearch_mcp.sources.ieee.search_ieee_with_browser", fake_browser_search)
+
     papers = await search_ieee("proxy test", max_results=3)
+    assert called == {"query": "proxy test", "max_results": 3, "proxy": proxy_url}
     assert len(papers) == 1
     assert papers[0].source == "ieee"
-    assert papers[0].title == "Frontend IEEE Paper"
+    assert papers[0].title == "Advanced IEEE Paper"
 
 
 def test_ieee_to_paper_invalid_year():
