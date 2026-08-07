@@ -68,10 +68,27 @@ def persisted_cookie_header(provider: str) -> str | None:
     cookies = [
         cookie
         for cookie in state.get("cookies", [])
-        if not cookie.get("expires") or cookie["expires"] > now
+        if _cookie_is_unexpired(cookie, now)
     ]
     header = cookie_header(cookies)
     return header or None
+
+
+def _cookie_is_unexpired(cookie: Mapping[str, Any], now: float) -> bool:
+    """Return True unless the cookie has a real, past expiry timestamp.
+
+    Playwright's storage_state() represents session cookies (no expiry until
+    the browser closes) with expires == -1, not a missing/falsy value. A
+    naive `not cookie.get("expires")` check treats 0 the same as missing, but
+    `cookie["expires"] > now` then evaluates `-1 > now` as False and drops
+    the cookie as if it were expired. Session cookies are exactly the ones
+    IEEE/Shibboleth/ezproxy rely on (JSESSIONID, ezproxy, shib_idp_session),
+    so this silently strips authentication from every persisted session.
+    """
+    expires = cookie.get("expires")
+    if expires is None or expires == -1:
+        return True
+    return expires > now
 
 
 def dotenv_quote(value: str) -> str:

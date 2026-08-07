@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import json
+import time
+
 from omnisearch_mcp.scripts.session_store import (
     context_options,
     cookie_header,
     dotenv_quote,
+    persisted_cookie_header,
     save_storage_state,
     storage_state_path,
     update_env_values,
@@ -58,3 +62,34 @@ def test_save_storage_state_writes_provider_file(tmp_path, monkeypatch):
     path = asyncio.run(save_storage_state(context, "consensus"))
     assert path.exists()
     assert context.saved_path == str(path)
+
+
+def test_persisted_cookie_header_keeps_session_cookies(tmp_path, monkeypatch):
+    """Playwright uses expires == -1 to mean 'session cookie, no expiry date'.
+
+    These are exactly the cookies IEEE/Shibboleth/ezproxy rely on for an
+    authenticated session (JSESSIONID, ezproxy, shib_idp_session, etc).
+    Treating -1 as "already expired" silently drops them, so every real
+    search request goes out unauthenticated even right after a successful
+    login.
+    """
+    monkeypatch.setenv("OMNISEARCH_SESSION_DIR", str(tmp_path))
+    path = storage_state_path("capes_ieee")
+    future = time.time() + 3600
+    past = time.time() - 3600
+    state = {
+        "cookies": [
+            {"name": "JSESSIONID", "value": "sessval", "expires": -1},
+            {"name": "ezproxy", "value": "ezval", "expires": -1},
+            {"name": "AWSALB", "value": "albval", "expires": future},
+            {"name": "old_token", "value": "oldval", "expires": past},
+        ]
+    }
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    header = persisted_cookie_header("capes_ieee")
+
+    assert "JSESSIONID=sessval" in header
+    assert "ezproxy=ezval" in header
+    assert "AWSALB=albval" in header
+    assert "old_token" not in header

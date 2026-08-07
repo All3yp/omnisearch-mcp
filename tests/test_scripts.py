@@ -400,9 +400,12 @@ def test_persisted_cookie_header_ignores_expired_cookies(tmp_path, monkeypatch):
     session_path = tmp_path / ".omnisearch" / "sessions" / "consensus.storage.json"
     session_path.parent.mkdir(parents=True)
     session_path.write_text(
+        # Playwright uses expires == -1 for session cookies (no expiry until the
+        # browser closes), not 0. A cookie with expires == 0 legitimately expired
+        # at the Unix epoch and must be filtered out.
         '{"cookies": ['
         '{"name":"expired","value":"old","expires":1},'
-        '{"name":"active","value":"new","expires":0}'
+        '{"name":"active","value":"new","expires":-1}'
         ']}',
         encoding="utf-8",
     )
