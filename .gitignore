@@ -41,3 +41,4 @@ uv.lock
 .serena/
 *bak*
 .ide/launch.json
+*.pdf

@@ -111,7 +111,8 @@ async def test_search_scite_missing_auth(monkeypatch):
     assert res["auth_required"] is True
     assert res["action"] == "human_relogin_required"
     assert res["provider"] == "scite"
-    assert "Stop retrying" in res["agent_instruction"]
+    assert "SESSION-level" in res["agent_instruction"]
+    assert "not a query problem" in res["agent_instruction"]
     assert res["results"] == []
 
 
@@ -370,9 +371,9 @@ async def test_search_all_reports_auth_required_sources(monkeypatch):
 
     res = await search_all("quantum", max_results_each=1)
     assert set(res["auth_required_sources"]) == {"ieee", "scite", "consensus"}
-    assert "do not retry" in res["agent_instruction"]
+    assert "session-level login failure" in res["agent_instruction"]
     assert "other configured" in res["agent_instruction"]
-    assert "configured API-backed" in res["ieee"]["agent_instruction"]
+    assert "SESSION-level" in res["ieee"]["agent_instruction"]
     assert res["ieee"]["action"] == "human_relogin_required"
 
 

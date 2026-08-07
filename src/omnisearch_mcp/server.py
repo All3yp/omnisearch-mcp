@@ -51,10 +51,15 @@ def _auth_error_response(provider: str, command: str, error: Exception) -> dict[
         "action": "human_relogin_required",
         "command": command,
         "agent_instruction": (
-            "Stop retrying this provider. Ask the human to run the command, "
-            "wait for login completion, then retry the same tool once. "
-            "For literature search, continue with configured API-backed/non-auth providers "
-            "instead of blocking on this provider."
+            f"This is a SESSION-level authentication failure for '{provider}', not a "
+            "query problem. Changing the search query, rephrasing it, or calling this "
+            "tool again will NOT fix it and will fail identically every time. "
+            "Do not call this tool again for ANY query until a human confirms the "
+            "login command below has completed successfully. "
+            f"Ask the human to run: {command}. "
+            "Continue the current task using other configured, non-auth-blocked providers "
+            "in the meantime, and clearly note in your final answer that this provider "
+            "was skipped due to expired authentication."
         ),
         "results": [],
     }
@@ -234,9 +239,12 @@ async def search_all(query: str, max_results_each: int = 5) -> dict[str, Any]:
         **sections,
         "auth_required_sources": auth_required_sources,
         "agent_instruction": (
-            "For sources in auth_required_sources, do not retry in a loop. "
-            "Ask the human to relogin with each section's command, wait, then retry once. "
-            "Keep using the other configured API-backed/non-auth providers for the search."
+            "For sources in auth_required_sources, this is a session-level login failure, "
+            "not a query problem. Do not retry those sources with the same or different "
+            "query text; it will fail identically every time. "
+            "Ask the human to relogin with each section's command, wait for confirmation, "
+            "then retry once. Keep using the other configured API-backed/non-auth providers "
+            "for the search in the meantime."
             if auth_required_sources
             else None
         ),

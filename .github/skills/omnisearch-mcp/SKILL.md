@@ -80,12 +80,23 @@ An authenticated provider can return:
 When `auth_required` is true, or a provider returns login HTML, `401`, `403`, or
 expired-cookie evidence:
 
-1. Do not modify MCP source code or retry that provider in a loop.
-2. Tell the human which `command` to run. Prefer visible login without
+This is a **session-level** failure tied to the provider's stored login, not to
+the query text. A different, rephrased, or narrower query will fail exactly the
+same way, because the session itself (cookies/tokens) is expired or missing —
+the query never reaches that check. Do not attempt to "work around" the error
+by trying new queries against the same provider.
+
+1. Do not modify MCP source code.
+2. Do not call that provider's tool again, with any query, until a human
+   confirms login succeeded. One failed call is enough signal; retrying with
+   different wording wastes calls and produces identical errors.
+3. Tell the human which `command` to run. Prefer visible login without
    `--headless` for CAPES/IEEE because MFA, CAPTCHA, and SSO may require it.
-3. Continue research with unaffected sources.
-4. Retry the blocked provider once after the human confirms login succeeded.
-5. If it still fails, report the authentication block and exclude that source.
+4. Continue research with unaffected sources in the meantime.
+5. After the human confirms login completed, retry the blocked provider once
+   with the original query.
+6. If it still fails, report the authentication block and exclude that source
+   from the final answer rather than retrying further.
 
 For `search_all`, read `auth_required_sources` and inspect each source section;
 successful source results remain usable even when other providers fail.
