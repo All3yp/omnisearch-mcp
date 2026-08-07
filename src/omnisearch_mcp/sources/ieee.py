@@ -18,12 +18,13 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .. import config
 from ..models import Paper
-from ..scripts.session_store import context_options
+from ..scripts.session_store import context_options, persisted_cookie_header
 
 API_URL = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
 IEEE_BASE_URL = "https://ieeexplore.ieee.org"
 IEEE_BROWSER_RESULTS_PER_PAGE = 50
 IEEE_ACCESS_DENIED_STATUS_CODES = {401, 403, 418}
+IEEE_CAPES_TIMEOUT = 10.0
 
 
 class IEEEKeyMissingError(RuntimeError):
@@ -130,6 +131,59 @@ def parse_ieee_frontend_response(payload: dict[str, Any]) -> list[Paper]:
     return [_to_paper_frontend(item) for item in (payload.get("records") or [])]
 
 
+def _capes_search_payload(query: str, max_results: int) -> dict[str, Any]:
+    return {
+        "newsearch": True,
+        "queryText": query,
+        "returnType": "SEARCH",
+        "rowsPerPage": max_results,
+    }
+
+
+def _raise_for_capes_response(response: httpx.Response) -> None:
+    content_type = response.headers.get("content-type", "").lower()
+    if response.is_redirect or response.status_code in IEEE_ACCESS_DENIED_STATUS_CODES:
+        raise IEEEKeyMissingError(
+            "CAPES/IEEE session is expired or unauthorized. Please run "
+            "'uv run omnisearch-capes-login' and complete IEEE access manually."
+        )
+    if "json" not in content_type:
+        raise IEEEKeyMissingError(
+            "CAPES/IEEE search did not return JSON. Please run "
+            "'uv run omnisearch-capes-login' and complete IEEE access manually."
+        )
+    response.raise_for_status()
+
+
+async def search_ieee_with_capes_session(
+    query: str,
+    max_results: int,
+    proxy_url: str,
+    cookies: str,
+    user_agent: str,
+) -> list[Paper]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Cookie": cookies,
+        "User-Agent": user_agent,
+    }
+    async with httpx.AsyncClient(follow_redirects=False, timeout=IEEE_CAPES_TIMEOUT) as client:
+        response = await client.post(
+            f"{proxy_url.rstrip('/')}/rest/search",
+            headers=headers,
+            json=_capes_search_payload(query, max_results),
+        )
+    _raise_for_capes_response(response)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise IEEEKeyMissingError(
+            "CAPES/IEEE search returned invalid JSON. Please run "
+            "'uv run omnisearch-capes-login' and complete IEEE access manually."
+        ) from exc
+    return parse_ieee_frontend_response(payload)
+
+
 class IEEEAdvancedSearchParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -211,7 +265,7 @@ async def search_ieee_with_browser(query: str, max_results: int, proxy_url: str)
     context = await browser.new_context(**context_options("capes_ieee"))
     page = await context.new_page()
     try:
-        await page.goto(f"{proxy_url.rstrip('/')}/Xplore/home.jsp", wait_until="domcontentloaded", timeout=30_000)
+        await page.goto(f"{proxy_url.rstrip('/')}/search/advanced", wait_until="domcontentloaded", timeout=30_000)
         search_box = page.locator(
             'input[type="search"], input[placeholder*="Search" i], input[aria-label*="Search" i], input[name="queryText"], input[name="query"]'
         ).first
@@ -304,6 +358,12 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
             _raise_for_ieee_status(resp)
             return parse_ieee_response(resp.json())
 
-    # 2. Fallback to browser scraping through the CAPES proxy.
     proxy_url = cfg.capes_proxy_url or IEEE_BASE_URL
+    cookies = persisted_cookie_header("capes_ieee") or cfg.ieee_cookies
+    if cookies:
+        return await search_ieee_with_capes_session(
+            query, max_results, proxy_url, cookies, cfg.user_agent
+        )
+
+    # 2. Browser fallback is reserved for an existing CAPES browser session.
     return await search_ieee_with_browser(query, max_results, proxy_url)

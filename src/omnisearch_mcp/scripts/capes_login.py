@@ -26,11 +26,53 @@ async def validate_ieee_proxy_session(
     cookie_string: str,
     user_agent: str = "omnisearch-mcp/0.1",
 ) -> tuple[bool, str]:
-    """Validate CAPES/IEEE cookies with HTTP only for backwards-compatible tests."""
+    """Validate CAPES/IEEE cookies with a real IEEE search request."""
     if not proxy_url or not cookie_string:
         return False, "missing proxy URL or cookies"
 
-    return False, "direct HTTP validation is disabled; use browser validation"
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Cookie": cookie_string,
+        "User-Agent": user_agent,
+    }
+    payload = {
+        "newsearch": True,
+        "queryText": IEEE_VALIDATION_QUERY,
+        "returnType": "SEARCH",
+        "rowsPerPage": 1,
+    }
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=IEEE_VALIDATION_TIMEOUT
+        ) as client:
+            response = await client.post(
+                f"{proxy_url.rstrip('/')}/rest/search", headers=headers, json=payload
+            )
+    except httpx.HTTPError as exc:
+        return False, f"IEEE validation request failed: {type(exc).__name__}"
+
+    if response.is_redirect:
+        return False, "IEEE validation redirected to login"
+    if response.status_code in {401, 403, 418}:
+        return False, f"IEEE validation denied: HTTP {response.status_code}"
+    if response.status_code < 200 or response.status_code >= 300:
+        return False, f"IEEE validation failed: HTTP {response.status_code}"
+    
+    content_type = response.headers.get("content-type", "").lower()
+    if "json" not in content_type:
+        return False, "IEEE validation did not return JSON"
+    
+    try:
+        payload_response = response.json()
+    except ValueError:
+        return False, "IEEE validation returned invalid JSON"
+    
+    if not isinstance(payload_response, dict):
+        return False, "IEEE validation returned an unexpected response"
+    if "records" not in payload_response:
+        return False, "IEEE validation response missing records field"
+    
+    return True, "validated"
 
 
 async def validate_ieee_browser_session(page, proxy_url: str) -> tuple[bool, str]:
@@ -270,7 +312,7 @@ async def run_login_flow(headless: bool = False):
                     print(f"Erro na automação do formulário: {e}")
 
             await auto_fill()
-            print("Login detectado com sucesso!")
+            print("Login detectado; validando acesso IEEE...")
 
     active_page = context.pages[-1] if context.pages else page
     active_url = active_page.url.lower()
@@ -295,13 +337,13 @@ async def run_login_flow(headless: bool = False):
         print("Nenhum cookie capturado.")
         return
 
-    is_valid, validation_reason = await validate_ieee_browser_session(
-        active_page, capes_proxy_url
+    is_valid, validation_reason = await validate_ieee_proxy_session(
+        capes_proxy_url, cookie_string
     )
     if not is_valid:
         await browser.close()
         print(
-            "Sessão CAPES/IEEE não validada na busca avançada. "
+            "Sessão CAPES/IEEE não validada por busca HTTP. "
             f"Motivo: {validation_reason}. "
             "Ação humana necessária: execute `uv run omnisearch-capes-login` em modo visível, "
             "conclua MFA/CAPTCHA/SSO no navegador e tente a busca novamente uma vez."

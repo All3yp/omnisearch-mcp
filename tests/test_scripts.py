@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import httpx
 import pytest
@@ -71,6 +72,44 @@ async def test_current_url_changed_rejects_same_page_menu_click():
 
     assert changed is False
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_validate_ieee_proxy_session_requires_json_search_response():
+    proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+    route = respx.post(f"{proxy_url}/rest/search").mock(
+        return_value=httpx.Response(200, json={"records": []})
+    )
+
+    valid, reason = await capes_login.validate_ieee_proxy_session(
+        proxy_url, "session=valid", "test-agent"
+    )
+
+    assert valid is True
+    assert reason == "validated"
+    assert route.calls[0].request.headers["cookie"] == "session=valid"
+    assert json.loads(route.calls[0].request.content) == {
+        "newsearch": True,
+        "queryText": "machine learning",
+        "returnType": "SEARCH",
+        "rowsPerPage": 1,
+    }
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    httpx.Response(302, headers={"location": "https://acesso-cafe.capes.gov.br/login"}),
+    httpx.Response(403),
+    httpx.Response(200, text="<html>login</html>", headers={"content-type": "text/html"}),
+])
+@respx.mock
+async def test_validate_ieee_proxy_session_rejects_invalid_auth_response(response):
+    proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+    respx.post(f"{proxy_url}/rest/search").mock(return_value=response)
+
+    valid, reason = await capes_login.validate_ieee_proxy_session(proxy_url, "session=stale")
+
+    assert valid is False
+    assert reason != "validated"
+
 
 @pytest.mark.asyncio
 async def test_click_first_visible_falls_back_to_dom_click():
@@ -136,6 +175,9 @@ async def test_capes_login_flow_already_logged_in(mock_playwright, tmp_path, mon
     respx.get("https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp").mock(
         return_value=httpx.Response(200, text="IEEE Xplore search results")
     )
+    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
+        return_value=httpx.Response(200, json={"records": [], "totalRecords": 0})
+    )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
         with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_browser_session", _async_val((True, "validated"))):
@@ -158,6 +200,9 @@ async def test_capes_login_flow_uses_env_proxy_for_validation(mock_playwright, t
     mock_playwright.context.pages[0].url = "https://www.periodicos.capes.gov.br/"
     route = respx.get(f"{proxy_url}/Xplore/home.jsp").mock(
         return_value=httpx.Response(200, text="IEEE Xplore search results")
+    )
+    respx.post(f"{proxy_url}/rest/search").mock(
+        return_value=httpx.Response(200, json={"records": [], "totalRecords": 0})
     )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
@@ -214,6 +259,9 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
     respx.get("https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp").mock(
         return_value=httpx.Response(200, text="IEEE Xplore search results")
     )
+    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
+        return_value=httpx.Response(200, json={"records": [], "totalRecords": 0})
+    )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=browser):
         with patch("asyncio.sleep", _async_noop):
@@ -221,18 +269,6 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
 
     env_file = tmp_path / ".env"
     assert env_file.exists()
-
-
-@pytest.mark.asyncio
-async def test_validate_ieee_proxy_session_disables_direct_http():
-    valid, reason = await capes_login.validate_ieee_proxy_session(
-        "https://ieeexplore-ieee-org.proxy.capes.gov.br",
-        "session=abc",
-        "agent",
-    )
-    assert valid is False
-    assert "direct HTTP validation is disabled" in reason
-    assert "session=abc" not in reason
 
 
 @pytest.mark.asyncio

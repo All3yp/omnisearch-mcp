@@ -26,12 +26,16 @@ from .sources.semantic_scholar import search_semantic_scholar as _search_semanti
 from .sources.core import CoreKeyMissingError, search_core as _search_core
 from .sources.scite import SciteAuthMissingError, search_scite as _search_scite
 from .sources.consensus import ConsensusAuthMissingError, search_consensus as _search_consensus
+from .sources.google_scholar import SerpApiKeyMissingError, search_google_scholar as _search_google_scholar
 from .unpaywall import UnpaywallResolver
 from .utils import dedupe_papers
 
 log = logging.getLogger("omnisearch_mcp")
 
 mcp = FastMCP("omnisearch-mcp")
+
+SEARCH_ALL_SOURCE_TIMEOUT = 15.0
+SEARCH_ALL_IEEE_TIMEOUT = 5.0
 
 
 def _papers_to_dicts(papers) -> list[dict[str, Any]]:
@@ -132,31 +136,42 @@ async def search_consensus(query: str, max_results: int = 10) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def search_google_scholar(query: str, max_results: int = 10) -> dict[str, Any]:
+    """Search Google Scholar via SerpApi (requires SERPAPI_API_KEY)."""
+    try:
+        papers = await _search_google_scholar(query, max_results=max_results)
+    except SerpApiKeyMissingError as exc:
+        return {"error": str(exc), "results": []}
+    return {"source": "google_scholar", "query": query, "results": _papers_to_dicts(papers)}
+
+
+@mcp.tool()
 async def search_all(query: str, max_results_each: int = 5) -> dict[str, Any]:
-    """Search IEEE, arXiv, ACM, Semantic Scholar, CORE, Scite e Consensus in parallel.
+    """Search IEEE, arXiv, ACM, CrossRef, Semantic Scholar, CORE, Google Scholar, Scite e Consensus in parallel.
 
     Results are deduplicated by DOI and title+authors.
     """
-    # Per-source timeout to prevent one slow source from blocking the entire search
-    _SOURCE_TIMEOUT = 15.0
-
     async def _with_timeout(coro, label: str):
+        timeout = SEARCH_ALL_IEEE_TIMEOUT if label == "ieee" else SEARCH_ALL_SOURCE_TIMEOUT
         try:
-            return await asyncio.wait_for(coro, timeout=_SOURCE_TIMEOUT)
+            return await asyncio.wait_for(coro, timeout=timeout)
         except asyncio.TimeoutError:
-            log.warning("search_all: %s timed out after %.1fs", label, _SOURCE_TIMEOUT)
-            raise TimeoutError(f"{label} timed out after {_SOURCE_TIMEOUT}s")
+            log.warning("search_all: %s timed out after %.1fs", label, timeout)
+            raise TimeoutError(f"{label} timed out after {timeout}s")
 
     ieee_task = _with_timeout(_search_ieee(query, max_results=max_results_each), "ieee")
     arxiv_task = _with_timeout(_search_arxiv(query, max_results=max_results_each), "arxiv")
     acm_task = _with_timeout(_search_acm(query, max_results=max_results_each), "acm")
+    crossref_task = _with_timeout(_search_crossref(query, max_results=max_results_each), "crossref")
     s2_task = _with_timeout(_search_semantic_scholar(query, max_results=max_results_each), "semantic_scholar")
     core_task = _with_timeout(_search_core(query, max_results=max_results_each), "core")
+    scholar_task = _with_timeout(_search_google_scholar(query, max_results=max_results_each), "google_scholar")
     scite_task = _with_timeout(_search_scite(query, max_results=max_results_each), "scite")
     consensus_task = _with_timeout(_search_consensus(query, max_results=max_results_each), "consensus")
 
     results = await asyncio.gather(
-        ieee_task, arxiv_task, acm_task, s2_task, core_task, scite_task, consensus_task, return_exceptions=True
+        ieee_task, arxiv_task, acm_task, crossref_task, s2_task, core_task, scholar_task, scite_task, consensus_task,
+        return_exceptions=True,
     )
 
     def _section(label: str, value: Any) -> dict[str, Any]:
@@ -166,6 +181,8 @@ async def search_all(query: str, max_results_each: int = 5) -> dict[str, Any]:
             return _auth_error_response("scite", "uv run omnisearch-scite-login --headless", value)
         if isinstance(value, ConsensusAuthMissingError):
             return _auth_error_response("consensus", "uv run omnisearch-consensus-login --headless", value)
+        if isinstance(value, SerpApiKeyMissingError):
+            return {"error": str(value), "results": []}
         if hasattr(value, "__class__") and "Error" in value.__class__.__name__:
             return {"error": str(value), "results": []}
         if isinstance(value, Exception):
@@ -176,18 +193,22 @@ async def search_all(query: str, max_results_each: int = 5) -> dict[str, Any]:
     ieee_section = _section("ieee", results[0])
     arxiv_section = _section("arxiv", results[1])
     acm_section = _section("acm", results[2])
-    semantic_section = _section("semantic_scholar", results[3])
-    core_section = _section("core", results[4])
-    scite_section = _section("scite", results[5])
-    consensus_section = _section("consensus", results[6])
+    crossref_section = _section("crossref", results[3])
+    semantic_section = _section("semantic_scholar", results[4])
+    core_section = _section("core", results[5])
+    scholar_section = _section("google_scholar", results[6])
+    scite_section = _section("scite", results[7])
+    consensus_section = _section("consensus", results[8])
 
     # Deduplicate all papers across sources
     all_papers = (
         ieee_section.get("results", [])
         + arxiv_section.get("results", [])
         + acm_section.get("results", [])
+        + crossref_section.get("results", [])
         + semantic_section.get("results", [])
         + core_section.get("results", [])
+        + scholar_section.get("results", [])
         + scite_section.get("results", [])
         + consensus_section.get("results", [])
     )
@@ -197,8 +218,10 @@ async def search_all(query: str, max_results_each: int = 5) -> dict[str, Any]:
         "ieee": ieee_section,
         "arxiv": arxiv_section,
         "acm": acm_section,
+        "crossref": crossref_section,
         "semantic_scholar": semantic_section,
         "core": core_section,
+        "google_scholar": scholar_section,
         "scite": scite_section,
         "consensus": consensus_section,
     }

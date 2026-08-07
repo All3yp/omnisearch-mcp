@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
 import httpx
 import pytest
 import respx
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from omnisearch_mcp.sources.google_scholar import (
+    SerpApiKeyMissingError,
+    search_google_scholar,
+)
 
 from omnisearch_mcp.sources.arxiv import API_URL as ARXIV_URL
 from omnisearch_mcp.sources.arxiv import parse_arxiv_atom, search_arxiv
@@ -42,6 +50,8 @@ from omnisearch_mcp.sources.consensus import (
     search_consensus,
 )
 from omnisearch_mcp import config
+
+SERPAPI_TEST_URL = "https://serpapi.com/search.json"
 
 ARXIV_FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"
@@ -221,7 +231,7 @@ async def test_search_ieee_missing_key(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     with pytest.raises(IEEEKeyMissingError):
         await search_ieee("anything")
@@ -235,12 +245,73 @@ async def test_search_ieee_with_key(monkeypatch):
             ieee_api_key="fake-key", contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     respx.get(IEEE_URL).mock(return_value=httpx.Response(200, json=IEEE_FIXTURE))
     papers = await search_ieee("anything", max_results=3)
     assert len(papers) == 1
     assert papers[0].source == "ieee"
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_ieee_uses_authenticated_capes_session_before_browser(monkeypatch):
+    proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+    monkeypatch.setattr(
+        config, "get_config", lambda: config.Config(
+            ieee_api_key=None, contact_email="[EMAIL_REDACTED]", user_agent="agent",
+            capes_proxy_url=proxy_url, ieee_cookies="session=valid", semantic_scholar_api_key=None,
+            core_api_key=None, scite_cookies=None, consensus_cookies=None
+        , serpapi_api_key=None)
+    )
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.ieee.persisted_cookie_header", lambda provider: "saved=session"
+    )
+
+    route = respx.post(f"{proxy_url}/rest/search").mock(
+        return_value=httpx.Response(200, json=IEEE_FRONTEND_FIXTURE)
+    )
+    browser_search = AsyncMock()
+    monkeypatch.setattr("omnisearch_mcp.sources.ieee.search_ieee_with_browser", browser_search)
+
+    papers = await search_ieee("anything", max_results=3)
+
+    assert len(papers) == 1
+    assert papers[0].title == "Frontend IEEE Paper"
+    assert route.calls[0].request.headers["cookie"] == "saved=session"
+    assert json.loads(route.calls[0].request.content) == {
+        "newsearch": True,
+        "queryText": "anything",
+        "returnType": "SEARCH",
+        "rowsPerPage": 3,
+    }
+    browser_search.assert_not_called()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    httpx.Response(302, headers={"location": "https://acesso-cafe.capes.gov.br/login"}),
+    httpx.Response(401),
+    httpx.Response(403),
+    httpx.Response(200, text="<html>login</html>", headers={"content-type": "text/html"}),
+])
+@respx.mock
+async def test_search_ieee_rejects_invalid_capes_session_without_browser(monkeypatch, response):
+    proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+    monkeypatch.setattr(
+        config, "get_config", lambda: config.Config(
+            ieee_api_key=None, contact_email="[EMAIL_REDACTED]", user_agent="agent",
+            capes_proxy_url=proxy_url, ieee_cookies="session=stale", semantic_scholar_api_key=None,
+            core_api_key=None, scite_cookies=None, consensus_cookies=None
+        , serpapi_api_key=None)
+    )
+    monkeypatch.setattr("omnisearch_mcp.sources.ieee.persisted_cookie_header", lambda provider: None)
+    respx.post(f"{proxy_url}/rest/search").mock(return_value=response)
+    browser_search = AsyncMock()
+    monkeypatch.setattr("omnisearch_mcp.sources.ieee.search_ieee_with_browser", browser_search)
+
+    with pytest.raises(IEEEKeyMissingError, match="omnisearch-capes-login"):
+        await search_ieee("anything")
+
+    browser_search.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -251,7 +322,7 @@ async def test_search_ieee_418_requires_relogin(monkeypatch):
             ieee_api_key="fake-key", contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     respx.get(IEEE_URL).mock(return_value=httpx.Response(418))
 
@@ -325,10 +396,14 @@ async def test_search_ieee_browser_proxy_fallback(monkeypatch):
         config, "get_config", lambda: config.Config(
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=proxy_url,
-            ieee_cookies="session=123", semantic_scholar_api_key=None,
+            ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.ieee.persisted_cookie_header", lambda provider: None
+    )
+
     called = {}
 
     async def fake_browser_search(query, max_results, proxy):
@@ -367,7 +442,7 @@ async def test_search_semantic_scholar(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key="s2key",
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     respx.get(S2_URL).mock(return_value=httpx.Response(200, json={
         "data": [
@@ -398,7 +473,7 @@ async def test_search_semantic_scholar_retries_429(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key="s2key",
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     async def no_sleep(*_):
         return None
@@ -411,6 +486,28 @@ async def test_search_semantic_scholar_retries_429(monkeypatch):
     assert len(papers) == 1
     assert papers[0].title == "Recovered"
     assert route.call_count == 2
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_semantic_scholar_retries_without_rejected_key(monkeypatch):
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.semantic_scholar.get_config", lambda: config.Config(
+            ieee_api_key=None, contact_email="[EMAIL_REDACTED]", user_agent="agent",
+            capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key="rejected",
+            core_api_key=None, scite_cookies=None, consensus_cookies=None
+        , serpapi_api_key=None)
+    )
+    route = respx.get(S2_URL).mock(side_effect=[
+        httpx.Response(403),
+        httpx.Response(200, json={"data": []}),
+    ])
+
+    papers = await search_semantic_scholar("ai")
+
+    assert papers == []
+    assert route.call_count == 2
+    assert route.calls[0].request.headers["x-api-key"] == "rejected"
+    assert "x-api-key" not in route.calls[1].request.headers
 
 
 @pytest.mark.asyncio
@@ -435,7 +532,7 @@ async def test_search_core_missing_key(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     with pytest.raises(CoreKeyMissingError):
         await search_core("anything")
@@ -449,7 +546,7 @@ async def test_search_core_with_key(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key="corekey", scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     respx.get(CORE_URL).mock(return_value=httpx.Response(200, json={
         "results": [
@@ -470,6 +567,31 @@ async def test_search_core_with_key(monkeypatch):
     assert papers[0].source == "core"
     assert papers[0].title == "CORE Title"
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_core_retries_retryable_response(monkeypatch):
+    monkeypatch.setattr(
+        config, "get_config", lambda: config.Config(
+            ieee_api_key=None, contact_email="[EMAIL_REDACTED]", user_agent="agent",
+            capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
+            core_api_key="corekey", scite_cookies=None, consensus_cookies=None
+        , serpapi_api_key=None)
+    )
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("omnisearch_mcp.sources.core.asyncio.sleep", no_sleep)
+    route = respx.get(CORE_URL).mock(side_effect=[
+        httpx.Response(503),
+        httpx.Response(200, json={"results": []}),
+    ])
+
+    papers = await search_core("robotics")
+
+    assert papers == []
+    assert route.call_count == 2
+
 
 @pytest.mark.asyncio
 async def test_search_scite_missing_cookies(monkeypatch):
@@ -478,10 +600,118 @@ async def test_search_scite_missing_cookies(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     with pytest.raises(SciteAuthMissingError):
         await search_scite("anything")
+
+
+@pytest.mark.asyncio
+async def test_search_google_scholar_missing_key(monkeypatch):
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.google_scholar.get_config",
+        lambda: SimpleNamespace(serpapi_api_key=None, user_agent="agent"),
+    )
+
+    with pytest.raises(SerpApiKeyMissingError, match="SERPAPI_API_KEY"):
+        await search_google_scholar("retrieval augmented generation")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_google_scholar_normalizes_serpapi_results(monkeypatch):
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.google_scholar.get_config",
+        lambda: SimpleNamespace(serpapi_api_key="serpapi-test-key", user_agent="agent"),
+    )
+    route = respx.get("https://serpapi.com/search.json").mock(return_value=httpx.Response(200, json={
+        "organic_results": [{
+            "title": "Grounded Generation for Research",
+            "publication_info": {
+                "summary": "Ada Lovelace, Alan Turing - Journal of Testing, 2024",
+                "authors": [{"name": "Ada Lovelace"}, {"name": "Alan Turing"}],
+            },
+            "link": "https://example.org/paper",
+            "snippet": "A concise abstract-like search result snippet.",
+            "resources": [{"file_format": "PDF", "link": "https://example.org/paper.pdf"}],
+            "result_id": "scholar-result-123",
+        }],
+    }))
+
+    papers = await search_google_scholar("grounded generation", max_results=999)
+
+    assert route.called
+    assert str(route.calls[0].request.url).split("?", maxsplit=1)[0] == "https://serpapi.com/search.json"
+    assert dict(route.calls[0].request.url.params) == {
+        "engine": "google_scholar",
+        "q": "grounded generation",
+        "num": "20",
+        "api_key": "serpapi-test-key",
+    }
+    assert len(papers) == 1
+    paper = papers[0]
+    assert paper.source == "google_scholar"
+    assert paper.title == "Grounded Generation for Research"
+    assert paper.authors == ["Ada Lovelace", "Alan Turing"]
+    assert paper.year == 2024
+    assert paper.venue == "Journal of Testing"
+    assert paper.url == "https://example.org/paper"
+    assert paper.abstract == "A concise abstract-like search result snippet."
+    assert paper.pdf_url == "https://example.org/paper.pdf"
+    assert paper.identifiers == {"result_id": "scholar-result-123"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_google_scholar_creates_async_client(monkeypatch):
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.google_scholar.get_config",
+        lambda: SimpleNamespace(serpapi_api_key="serpapi-test-key", user_agent="agent"),
+    )
+    route = respx.get("https://serpapi.com/search.json").mock(
+        return_value=httpx.Response(200, json={"organic_results": []})
+    )
+    async_client = httpx.AsyncClient
+    created_with: list[dict[str, object]] = []
+
+    def track_async_client(*args, **kwargs):
+        created_with.append(kwargs)
+        return async_client(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.google_scholar.httpx.AsyncClient", track_async_client
+    )
+
+    papers = await search_google_scholar("grounded generation")
+
+    assert papers == []
+    assert route.called
+    assert created_with
+    assert created_with[0]["headers"] == {"User-Agent": "agent"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("transient_status", [429, 503])
+async def test_search_google_scholar_retries_transient_responses(monkeypatch, transient_status):
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.google_scholar.get_config",
+        lambda: SimpleNamespace(serpapi_api_key="serpapi-test-key", user_agent="agent"),
+    )
+
+    async def no_sleep(*_):
+        return None
+
+    monkeypatch.setattr("omnisearch_mcp.sources.google_scholar.asyncio.sleep", no_sleep)
+    route = respx.get(SERPAPI_TEST_URL).mock(side_effect=[
+        httpx.Response(transient_status, json={"error": "temporary failure"}),
+        httpx.Response(200, json={"organic_results": [{"title": "Recovered Scholar Result"}]}),
+    ])
+
+    papers = await search_google_scholar("retries", max_results=1)
+
+    assert route.call_count == 2
+    assert [paper.title for paper in papers] == ["Recovered Scholar Result"]
 
 
 @pytest.mark.asyncio
@@ -492,7 +722,7 @@ async def test_search_scite_with_cookies(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies="session=abc", consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     respx.get(SCITE_URL).mock(return_value=httpx.Response(200, json={
         "hits": {
@@ -524,7 +754,7 @@ async def test_search_consensus_missing_cookies(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies=None
-        )
+        , serpapi_api_key=None)
     )
     with pytest.raises(ConsensusAuthMissingError):
         await search_consensus("anything")
@@ -538,7 +768,7 @@ async def test_search_consensus_with_cookies(monkeypatch):
             ieee_api_key=None, contact_email="a@b.com", user_agent="agent",
             capes_proxy_url=None, ieee_cookies=None, semantic_scholar_api_key=None,
             core_api_key=None, scite_cookies=None, consensus_cookies="session=xyz"
-        )
+        , serpapi_api_key=None)
     )
     respx.get(CONSENSUS_URL).mock(return_value=httpx.Response(200, json={
         "results": [

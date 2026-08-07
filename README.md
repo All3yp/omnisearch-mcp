@@ -151,7 +151,7 @@ Se seu cliente Codex usar JSON em vez de TOML, use:
 
 | Tool | Uso |
 |---|---|
-| `search_all(query, max_results_each=5)` | Busca em todas as fontes, preserva seções por fonte e retorna `papers` deduplicado + `total`. |
+| `search_all(query, max_results_each=5)` | Busca IEEE, arXiv, ACM, CrossRef, Semantic Scholar, CORE, Scite e Consensus em paralelo; IEEE expira em 5 s e demais fontes em 15 s. Preserva seções por fonte e retorna `papers` deduplicado + `total`. |
 | `search_ieee(query, max_results=10)` | Busca IEEE por API key ou sessão CAPES/IEEE. A busca via navegador pagina os resultados até atingir `max_results` ou esgotar a busca. |
 | `search_arxiv(query, max_results=10)` | Busca arXiv aberta com retry para rate-limit. |
 | `search_acm(query, max_results=10)` | Busca ACM via CrossRef metadata. |
@@ -191,7 +191,7 @@ Payload mínimo:
 
 Só salva se o endpoint retornar JSON compatível com IEEE. Se receber HTML/login/401/403/redirect, não salva e pede relogin humano.
 
-Quando não há `IEEE_XPLORE_API_KEY`, o adapter `search_ieee` usa uma sessão CAPES/IEEE persistida no navegador. Ele seleciona até 50 itens por página e avança pelas páginas até atingir `max_results` ou esgotar os resultados da IEEE.
+Quando não há `IEEE_XPLORE_API_KEY`, o adapter `search_ieee` usa uma sessão CAPES/IEEE persistida no navegador. Ele abre diretamente a busca avançada, seleciona até 50 itens por página e avança pelas páginas até atingir `max_results` ou esgotar os resultados da IEEE.
 
 ## Skill para agentes consumidores
 

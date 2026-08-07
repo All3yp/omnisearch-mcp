@@ -20,6 +20,7 @@ class Config:
     core_api_key: str | None
     scite_cookies: str | None
     consensus_cookies: str | None
+    serpapi_api_key: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -38,6 +39,7 @@ class Config:
             core_api_key=os.getenv("CORE_API_KEY") or None,
             scite_cookies=os.getenv("SCITE_COOKIES") or None,
             consensus_cookies=os.getenv("CONSENSUS_COOKIES") or None,
+            serpapi_api_key=os.getenv("SERPAPI_API_KEY") or None,
         )
 
 

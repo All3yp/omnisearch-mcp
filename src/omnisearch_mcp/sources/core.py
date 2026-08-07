@@ -4,6 +4,8 @@ Docs: https://core.ac.uk/services/api/
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import httpx
@@ -12,6 +14,18 @@ from .. import config
 from ..models import Paper
 
 API_URL = "https://api.core.ac.uk/v3/search/works"
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0
+
+log = logging.getLogger("omnisearch_mcp")
+
+def _retry_after_seconds(value: str | None, fallback: float) -> float:
+    """Return a valid Retry-After value or the exponential-backoff fallback."""
+    try:
+        return max(0.0, float(value)) if value is not None else fallback
+    except ValueError:
+        return fallback
 
 class CoreKeyMissingError(RuntimeError):
     """Raised when the CORE API key is not configured."""
@@ -72,7 +86,26 @@ async def search_core(query: str, max_results: int = 10) -> list[Paper]:
     }
 
     async with httpx.AsyncClient(timeout=30.0, headers=headers, follow_redirects=True) as client:
-        resp = await client.get(API_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return [_to_paper(item) for item in (data.get("results") or [])]
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                resp = await client.get(API_URL, params=params)
+            except httpx.TransportError:
+                if attempt == _MAX_RETRIES:
+                    raise
+                wait = _RETRY_BACKOFF * (2 ** attempt)
+                log.warning("core: transport error, retrying in %.1fs (attempt %d/%d)", wait, attempt + 1, _MAX_RETRIES)
+                await asyncio.sleep(wait)
+                continue
+
+            if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
+                wait = _retry_after_seconds(
+                    resp.headers.get("Retry-After"), _RETRY_BACKOFF * (2 ** attempt)
+                )
+                log.warning("core: %d response, retrying in %.1fs (attempt %d/%d)", resp.status_code, wait, attempt + 1, _MAX_RETRIES)
+                await asyncio.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            return [_to_paper(item) for item in (data.get("results") or [])]
+    return []
