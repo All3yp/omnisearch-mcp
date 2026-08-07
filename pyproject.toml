@@ -38,6 +38,7 @@ omnisearch-capes-login = "omnisearch_mcp.scripts.capes_login:main"
 omnisearch-scite-login = "omnisearch_mcp.scripts.scite_login:main"
 omnisearch-consensus-login = "omnisearch_mcp.scripts.consensus_login:main"
 omnisearch-login-all = "omnisearch_mcp.scripts.login_all:main"
+omnisearch-check-auth = "omnisearch_mcp.scripts.check_auth:main"
 
 [build-system]
 requires = ["uv_build>=0.11.8,<0.12.0"]
