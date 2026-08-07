@@ -29,6 +29,7 @@ from omnisearch_mcp.sources.ieee import (
     parse_ieee_response,
     parse_ieee_frontend_response,
     search_ieee,
+    search_ieee_with_capes_session,
 )
 from omnisearch_mcp.sources.semantic_scholar import (
     API_URL as S2_URL,
@@ -253,7 +254,6 @@ async def test_search_ieee_with_key(monkeypatch):
     assert papers[0].source == "ieee"
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_search_ieee_uses_authenticated_capes_session_before_browser(monkeypatch):
     proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
     monkeypatch.setattr(
@@ -267,8 +267,30 @@ async def test_search_ieee_uses_authenticated_capes_session_before_browser(monke
         "omnisearch_mcp.sources.ieee.persisted_cookie_header", lambda provider: "saved=session"
     )
 
-    route = respx.post(f"{proxy_url}/rest/search").mock(
-        return_value=httpx.Response(200, json=IEEE_FRONTEND_FIXTURE)
+    captured_calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return IEEE_FRONTEND_FIXTURE
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None, **kwargs):
+            captured_calls.append(
+                SimpleNamespace(url=url, headers=headers, json=json, kwargs=kwargs)
+            )
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.ieee.AsyncSession", lambda *a, **k: FakeSession()
     )
     browser_search = AsyncMock()
     monkeypatch.setattr("omnisearch_mcp.sources.ieee.search_ieee_with_browser", browser_search)
@@ -277,24 +299,31 @@ async def test_search_ieee_uses_authenticated_capes_session_before_browser(monke
 
     assert len(papers) == 1
     assert papers[0].title == "Frontend IEEE Paper"
-    assert route.calls[0].request.headers["cookie"] == "saved=session"
-    assert json.loads(route.calls[0].request.content) == {
+    assert captured_calls[0].url == f"{proxy_url}/rest/search"
+    assert captured_calls[0].headers["Cookie"] == "saved=session"
+    assert captured_calls[0].json == {
         "newsearch": True,
         "queryText": "anything",
         "returnType": "SEARCH",
         "rowsPerPage": 3,
     }
+    assert captured_calls[0].kwargs["impersonate"] == "chrome124"
+    # An explicit non-browser User-Agent overrides curl_cffi's impersonation UA
+    # while leaving Chrome's sec-ch-ua/TLS fingerprint intact, and Akamai flags
+    # that mismatch as a bot (HTTP 418). Let curl_cffi supply a consistent UA.
+    assert "User-Agent" not in captured_calls[0].headers
     browser_search.assert_not_called()
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("response", [
-    httpx.Response(302, headers={"location": "https://acesso-cafe.capes.gov.br/login"}),
-    httpx.Response(401),
-    httpx.Response(403),
-    httpx.Response(200, text="<html>login</html>", headers={"content-type": "text/html"}),
+@pytest.mark.parametrize("status_code,headers,text", [
+    (302, {"location": "https://acesso-cafe.capes.gov.br/login"}, ""),
+    (401, {}, ""),
+    (403, {}, ""),
+    (200, {"content-type": "text/html"}, "<html>login</html>"),
 ])
-@respx.mock
-async def test_search_ieee_rejects_invalid_capes_session_without_browser(monkeypatch, response):
+async def test_search_ieee_rejects_invalid_capes_session_without_browser(
+    monkeypatch, status_code, headers, text
+):
     proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
     monkeypatch.setattr(
         config, "get_config", lambda: config.Config(
@@ -304,7 +333,28 @@ async def test_search_ieee_rejects_invalid_capes_session_without_browser(monkeyp
         , serpapi_api_key=None)
     )
     monkeypatch.setattr("omnisearch_mcp.sources.ieee.persisted_cookie_header", lambda provider: None)
-    respx.post(f"{proxy_url}/rest/search").mock(return_value=response)
+
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = status_code
+            self.headers = headers
+
+        def json(self):
+            raise ValueError("not json")
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.ieee.AsyncSession", lambda *a, **k: FakeSession()
+    )
     browser_search = AsyncMock()
     monkeypatch.setattr("omnisearch_mcp.sources.ieee.search_ieee_with_browser", browser_search)
 
@@ -312,6 +362,46 @@ async def test_search_ieee_rejects_invalid_capes_session_without_browser(monkeyp
         await search_ieee("anything")
 
     browser_search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_search_ieee_with_capes_session_uses_browser_impersonation(monkeypatch):
+    """The CAPES fast-path must go through curl_cffi with a browser TLS fingerprint,
+    not plain httpx, otherwise Akamai flags the request as a bot (HTTP 418)."""
+    proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
+    fake_response = SimpleNamespace(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        json=lambda: IEEE_FRONTEND_FIXTURE,
+    )
+    mock_post = AsyncMock(return_value=fake_response)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        post = mock_post
+
+    monkeypatch.setattr(
+        "omnisearch_mcp.sources.ieee.AsyncSession", lambda *a, **k: FakeSession()
+    )
+
+    papers = await search_ieee_with_capes_session(
+        "anything", 3, proxy_url, "session=valid"
+    )
+
+    assert len(papers) == 1
+    assert papers[0].title == "Frontend IEEE Paper"
+    assert mock_post.call_args.kwargs["impersonate"] == "chrome124"
+    assert mock_post.call_args.kwargs["headers"]["Cookie"] == "session=valid"
+    assert mock_post.call_args.args[0] == f"{proxy_url}/rest/search"
+    # An explicit non-browser User-Agent overrides curl_cffi's impersonation UA
+    # while leaving Chrome's sec-ch-ua/TLS fingerprint intact, and Akamai flags
+    # that mismatch as a bot (HTTP 418). Let curl_cffi supply a consistent UA.
+    assert "User-Agent" not in mock_post.call_args.kwargs["headers"]
 
 
 @pytest.mark.asyncio

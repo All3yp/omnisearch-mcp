@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 import httpx
 from cloakbrowser import launch_async
+from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.errors import RequestsError
 
 from .session_store import (
     context_options,
@@ -19,21 +21,26 @@ from .session_store import (
 
 IEEE_VALIDATION_QUERY = "machine learning"
 IEEE_VALIDATION_TIMEOUT = 20.0
+IEEE_IMPERSONATE = "chrome124"
 
 
 async def validate_ieee_proxy_session(
     proxy_url: str,
     cookie_string: str,
-    user_agent: str = "omnisearch-mcp/0.1",
 ) -> tuple[bool, str]:
     """Validate CAPES/IEEE cookies with a real IEEE search request."""
     if not proxy_url or not cookie_string:
         return False, "missing proxy URL or cookies"
 
+    # curl_cffi impersonates a real browser TLS/JA3 fingerprint. Plain httpx has a
+    # distinct fingerprint that Akamai Bot Manager flags as a bot (HTTP 418) even
+    # with fresh, valid cookies from a successful browser login. Do NOT set an
+    # explicit User-Agent here: impersonate=chrome124 already supplies one that
+    # matches the TLS/JA3 fingerprint and sec-ch-ua headers; overriding it with
+    # a non-browser UA reintroduces the same mismatch Akamai flags as a bot.
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Cookie": cookie_string,
-        "User-Agent": user_agent,
     }
     payload = {
         "newsearch": True,
@@ -42,16 +49,19 @@ async def validate_ieee_proxy_session(
         "rowsPerPage": 1,
     }
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=False, timeout=IEEE_VALIDATION_TIMEOUT
-        ) as client:
-            response = await client.post(
-                f"{proxy_url.rstrip('/')}/rest/search", headers=headers, json=payload
+        async with AsyncSession() as session:
+            response = await session.post(
+                f"{proxy_url.rstrip('/')}/rest/search",
+                headers=headers,
+                json=payload,
+                impersonate=IEEE_IMPERSONATE,
+                timeout=IEEE_VALIDATION_TIMEOUT,
+                allow_redirects=False,
             )
-    except httpx.HTTPError as exc:
+    except RequestsError as exc:
         return False, f"IEEE validation request failed: {type(exc).__name__}"
 
-    if response.is_redirect:
+    if response.status_code in {301, 302, 303, 307, 308}:
         return False, "IEEE validation redirected to login"
     if response.status_code in {401, 403, 418}:
         return False, f"IEEE validation denied: HTTP {response.status_code}"

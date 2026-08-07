@@ -5,6 +5,7 @@ import os
 import httpx
 import pytest
 import respx
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 
@@ -73,37 +74,84 @@ async def test_current_url_changed_rejects_same_page_menu_click():
     assert changed is False
 
 @pytest.mark.asyncio
-@respx.mock
-async def test_validate_ieee_proxy_session_requires_json_search_response():
+async def test_validate_ieee_proxy_session_requires_json_search_response(monkeypatch):
     proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
-    route = respx.post(f"{proxy_url}/rest/search").mock(
-        return_value=httpx.Response(200, json={"records": []})
+    captured_calls = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {"records": []}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None, **kwargs):
+            captured_calls.append(
+                SimpleNamespace(url=url, headers=headers, json=json, kwargs=kwargs)
+            )
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "omnisearch_mcp.scripts.capes_login.AsyncSession", lambda *a, **k: FakeSession()
     )
 
     valid, reason = await capes_login.validate_ieee_proxy_session(
-        proxy_url, "session=valid", "test-agent"
+        proxy_url, "session=valid"
     )
 
     assert valid is True
     assert reason == "validated"
-    assert route.calls[0].request.headers["cookie"] == "session=valid"
-    assert json.loads(route.calls[0].request.content) == {
+    assert captured_calls[0].headers["Cookie"] == "session=valid"
+    assert captured_calls[0].json == {
         "newsearch": True,
         "queryText": "machine learning",
         "returnType": "SEARCH",
         "rowsPerPage": 1,
     }
+    assert captured_calls[0].kwargs["impersonate"] == "chrome124"
+    # An explicit non-browser User-Agent overrides curl_cffi's impersonation UA
+    # while leaving Chrome's sec-ch-ua/TLS fingerprint intact, and Akamai flags
+    # that mismatch as a bot (HTTP 418). Let curl_cffi supply a consistent UA.
+    assert "User-Agent" not in captured_calls[0].headers
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("response", [
-    httpx.Response(302, headers={"location": "https://acesso-cafe.capes.gov.br/login"}),
-    httpx.Response(403),
-    httpx.Response(200, text="<html>login</html>", headers={"content-type": "text/html"}),
+@pytest.mark.parametrize("status_code, headers, text", [
+    (302, {"location": "https://acesso-cafe.capes.gov.br/login"}, ""),
+    (403, {}, ""),
+    (200, {"content-type": "text/html"}, "<html>login</html>"),
 ])
-@respx.mock
-async def test_validate_ieee_proxy_session_rejects_invalid_auth_response(response):
+async def test_validate_ieee_proxy_session_rejects_invalid_auth_response(status_code, headers, text, monkeypatch):
     proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
-    respx.post(f"{proxy_url}/rest/search").mock(return_value=response)
+
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = status_code
+            self.headers = headers
+            self.text = text
+
+        def json(self):
+            raise ValueError("not json")
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "omnisearch_mcp.scripts.capes_login.AsyncSession", lambda *a, **k: FakeSession()
+    )
 
     valid, reason = await capes_login.validate_ieee_proxy_session(proxy_url, "session=stale")
 
@@ -168,20 +216,17 @@ def mock_playwright(mock_playwright_page):
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_capes_login_flow_already_logged_in(mock_playwright, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAFE_INSTITUTION_ID", raising=False)
+    monkeypatch.delenv("CAFE_USERNAME", raising=False)
+    monkeypatch.delenv("CAFE_PASSWORD", raising=False)
     mock_playwright.context.pages[0].url = "https://ieeexplore-ieee-org.proxy.capes.gov.br/"
-    respx.get("https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp").mock(
-        return_value=httpx.Response(200, text="IEEE Xplore search results")
-    )
-    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
-        return_value=httpx.Response(200, json={"records": [], "totalRecords": 0})
-    )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
         with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_browser_session", _async_val((True, "validated"))):
-            await capes_login.run_login_flow(headless=True)
+            with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_proxy_session", _async_val((True, "validated"))):
+                await capes_login.run_login_flow(headless=True)
 
     env_file = tmp_path / ".env"
     assert env_file.exists()
@@ -191,23 +236,20 @@ async def test_capes_login_flow_already_logged_in(mock_playwright, tmp_path, mon
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_capes_login_flow_uses_env_proxy_for_validation(mock_playwright, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAFE_INSTITUTION_ID", raising=False)
+    monkeypatch.delenv("CAFE_USERNAME", raising=False)
+    monkeypatch.delenv("CAFE_PASSWORD", raising=False)
     proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br"
     monkeypatch.setenv("CAPES_PROXY_URL", proxy_url)
     (tmp_path / ".env").write_text(f"CAPES_PROXY_URL={proxy_url}\n", encoding="utf-8")
     mock_playwright.context.pages[0].url = "https://www.periodicos.capes.gov.br/"
-    route = respx.get(f"{proxy_url}/Xplore/home.jsp").mock(
-        return_value=httpx.Response(200, text="IEEE Xplore search results")
-    )
-    respx.post(f"{proxy_url}/rest/search").mock(
-        return_value=httpx.Response(200, json={"records": [], "totalRecords": 0})
-    )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=mock_playwright):
         with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_browser_session", _async_val((True, "validated"))):
-            await capes_login.run_login_flow(headless=True)
+            with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_proxy_session", _async_val((True, "validated"))):
+                await capes_login.run_login_flow(headless=True)
 
     content = (tmp_path / ".env").read_text()
     assert f"CAPES_PROXY_URL='{proxy_url}'" in content
@@ -215,7 +257,6 @@ async def test_capes_login_flow_uses_env_proxy_for_validation(mock_playwright, t
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     proxy_url = "https://ieeexplore-ieee-org.proxy.capes.gov.br/"
@@ -259,13 +300,11 @@ async def test_capes_login_flow_auto_fill(mock_playwright_page, tmp_path, monkey
     respx.get("https://ieeexplore-ieee-org.proxy.capes.gov.br/Xplore/home.jsp").mock(
         return_value=httpx.Response(200, text="IEEE Xplore search results")
     )
-    respx.post("https://ieeexplore-ieee-org.proxy.capes.gov.br/rest/search").mock(
-        return_value=httpx.Response(200, json={"records": [], "totalRecords": 0})
-    )
 
     with patch("omnisearch_mcp.scripts.capes_login.launch_async", return_value=browser):
-        with patch("asyncio.sleep", _async_noop):
-            await capes_login.run_login_flow(headless=True)
+        with patch("omnisearch_mcp.scripts.capes_login.validate_ieee_proxy_session", _async_val((True, "validated"))):
+            with patch("asyncio.sleep", _async_noop):
+                await capes_login.run_login_flow(headless=True)
 
     env_file = tmp_path / ".env"
     assert env_file.exists()

@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 from cloakbrowser import launch_async
+from curl_cffi.requests import AsyncSession
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .. import config
@@ -25,6 +26,7 @@ IEEE_BASE_URL = "https://ieeexplore.ieee.org"
 IEEE_BROWSER_RESULTS_PER_PAGE = 50
 IEEE_ACCESS_DENIED_STATUS_CODES = {401, 403, 418}
 IEEE_CAPES_TIMEOUT = 10.0
+IEEE_IMPERSONATE = "chrome124"
 
 
 class IEEEKeyMissingError(RuntimeError):
@@ -140,9 +142,10 @@ def _capes_search_payload(query: str, max_results: int) -> dict[str, Any]:
     }
 
 
-def _raise_for_capes_response(response: httpx.Response) -> None:
-    content_type = response.headers.get("content-type", "").lower()
-    if response.is_redirect or response.status_code in IEEE_ACCESS_DENIED_STATUS_CODES:
+def _raise_for_capes_response(response) -> None:
+    content_type = (response.headers.get("content-type") or "").lower()
+    is_redirect = response.status_code in (301, 302, 303, 307, 308)
+    if is_redirect or response.status_code in IEEE_ACCESS_DENIED_STATUS_CODES:
         raise IEEEKeyMissingError(
             "CAPES/IEEE session is expired or unauthorized. Please run "
             "'uv run omnisearch-capes-login' and complete IEEE access manually."
@@ -152,7 +155,11 @@ def _raise_for_capes_response(response: httpx.Response) -> None:
             "CAPES/IEEE search did not return JSON. Please run "
             "'uv run omnisearch-capes-login' and complete IEEE access manually."
         )
-    response.raise_for_status()
+    if response.status_code < 200 or response.status_code >= 300:
+        raise IEEEKeyMissingError(
+            f"CAPES/IEEE search failed: HTTP {response.status_code}. Please run "
+            "'uv run omnisearch-capes-login' and complete IEEE access manually."
+        )
 
 
 async def search_ieee_with_capes_session(
@@ -160,18 +167,25 @@ async def search_ieee_with_capes_session(
     max_results: int,
     proxy_url: str,
     cookies: str,
-    user_agent: str,
 ) -> list[Paper]:
+    # curl_cffi impersonates a real browser TLS/JA3 fingerprint. Plain httpx has a
+    # distinct fingerprint that Akamai Bot Manager flags as a bot (HTTP 418) even
+    # with fresh, valid cookies from a successful browser login. Do NOT set an
+    # explicit User-Agent here: impersonate=chrome124 already supplies one that
+    # matches the TLS/JA3 fingerprint and sec-ch-ua headers; overriding it with
+    # a non-browser UA reintroduces the same mismatch Akamai flags as a bot.
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Cookie": cookies,
-        "User-Agent": user_agent,
     }
-    async with httpx.AsyncClient(follow_redirects=False, timeout=IEEE_CAPES_TIMEOUT) as client:
-        response = await client.post(
+    async with AsyncSession() as session:
+        response = await session.post(
             f"{proxy_url.rstrip('/')}/rest/search",
             headers=headers,
             json=_capes_search_payload(query, max_results),
+            impersonate=IEEE_IMPERSONATE,
+            timeout=IEEE_CAPES_TIMEOUT,
+            allow_redirects=False,
         )
     _raise_for_capes_response(response)
     try:
@@ -362,7 +376,7 @@ async def search_ieee(query: str, max_results: int = 10) -> list[Paper]:
     cookies = persisted_cookie_header("capes_ieee") or cfg.ieee_cookies
     if cookies:
         return await search_ieee_with_capes_session(
-            query, max_results, proxy_url, cookies, cfg.user_agent
+            query, max_results, proxy_url, cookies
         )
 
     # 2. Browser fallback is reserved for an existing CAPES browser session.
