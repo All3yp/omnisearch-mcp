@@ -5,7 +5,7 @@
 
 ## MCP Consumer Skill
 
-Agents that call this server must read [`.github/skills/omnisearch-mcp/SKILL.md`](.github/skills/omnisearch-mcp/SKILL.md). It defines the tool contract, result shape, provider limits, authentication recovery, IEEE pagination, and the responsibility of the calling agent to produce any required structured synthesis.
+Agents that call this server must read [`.github/skills/omnisearch-mcp/SKILL.md`](.github/skills/omnisearch-mcp/SKILL.md) (also mirrored at [`.claude/skills/omnisearch-mcp/SKILL.md`](.claude/skills/omnisearch-mcp/SKILL.md) for Claude Code). It defines the tool contract, result shape, provider limits, authentication recovery, IEEE pagination, and the responsibility of the calling agent to produce any required structured synthesis. Keep both copies in sync when editing.
 
 ---
 
